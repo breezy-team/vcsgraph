@@ -18,7 +18,6 @@ dev = [
 [tool.setuptools]
 packages = ["vcsgraph"]
 
-[tool.setuptools-rust]
 [[tool.setuptools-rust.ext-modules]]
 target = "vcsgraph._graph_rs"
 path = "crates/graph-py/Cargo.toml"
