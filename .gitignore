@@ -13,3 +13,4 @@ build/
 .mypy_cache/
 .claude/settings.local.json
 vcsgraph.egg-info/
+dist/
