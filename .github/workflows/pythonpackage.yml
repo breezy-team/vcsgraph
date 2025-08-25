@@ -41,11 +41,11 @@ jobs:
         if: "matrix.python-version != 'pypy3'"
       - name: Test suite run (Linux)
         run: |
-          python -m unittest discover -v vcsgraph/tests
+          python -m unittest vcsgraph.tests.test_suite
         env:
           PYTHONHASHSEED: random
           PYTHONPATH: .
       - name: Run mypy
         run: |
-          python -m mypy breezy
+          python -m mypy vcsgraph
         if: "matrix.python-version != 'pypy3'"

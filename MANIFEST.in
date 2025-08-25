@@ -3,4 +3,4 @@ recursive-include vcsgraph *.py
 recursive-include crates Cargo.toml *.rs
 include Cargo.lock
 include Cargo.toml
-include breezy/py.typed
+include vcsgraph/py.typed

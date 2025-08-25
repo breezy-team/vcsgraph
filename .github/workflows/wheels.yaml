@@ -121,7 +121,7 @@ jobs:
       id-token: write
     environment:
       name: pypi
-      url: https://pypi.org/p/breezy
+      url: https://pypi.org/p/vcsgraph
     steps:
       - uses: actions/setup-python@v5
 

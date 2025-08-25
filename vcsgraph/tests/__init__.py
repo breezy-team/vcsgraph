@@ -20,8 +20,6 @@ import tempfile
 import unittest
 from unittest import TestCase
 
-from breezy import osutils
-
 __all__ = ["TestCaseInTempDir"]
 
 
@@ -44,11 +42,11 @@ class TestCaseInTempDir(TestCase):
 
     def assertPathExists(self, path):
         """Fail unless path exists."""
-        self.assertTrue(osutils.lexists(path), f"{path} does not exist")
+        self.assertTrue(os.path.lexists(path), f"{path} does not exist")
 
     def assertPathDoesNotExist(self, path):
         """Fail if path exists."""
-        self.assertFalse(osutils.lexists(path), f"{path} exists")
+        self.assertFalse(os.path.lexists(path), f"{path} exists")
 
 
 def test_suite() -> unittest.TestSuite:
