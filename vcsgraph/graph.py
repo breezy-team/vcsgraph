@@ -14,14 +14,19 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
 
+"""Graph algorithms for version control systems."""
+
+__all__ = ["collapse_linear_regions", "invert_parent_map"]
+
 import contextlib
 import logging
 import time
 
 from . import errors
+from ._graph_rs import collapse_linear_regions, invert_parent_map
 
 # NULL_REVISION constant
-NULL_REVISION = b'null:'
+NULL_REVISION = b"null:"
 
 # Logger for debug output
 logger = logging.getLogger(__name__)
@@ -574,15 +579,15 @@ class Graph:
                     )
                 )
         logger.debug(
-                "For %d unique nodes, created %d + 1 unique searchers"
-                " (%d stopped search tips, %d common ancestors"
-                " (%d stopped common)",
-                len(unique_nodes),
-                len(unique_tip_searchers),
-                total_stopped,
-                len(ancestor_all_unique),
-                len(stopped_common),
-            )
+            "For %d unique nodes, created %d + 1 unique searchers"
+            " (%d stopped search tips, %d common ancestors"
+            " (%d stopped common)",
+            len(unique_nodes),
+            len(unique_tip_searchers),
+            total_stopped,
+            len(ancestor_all_unique),
+            len(stopped_common),
+        )
         return all_unique_searcher, unique_tip_searchers
 
     def _step_unique_and_common_searchers(
@@ -1390,11 +1395,7 @@ class _BreadthFirstSearcher:
     def __repr__(self):
         prefix = "searching" if self._iterations else "starting"
         search = f"{prefix}={list(self._next_query)!r}"
-        return "_BreadthFirstSearcher(iterations=%d, %s, seen=%r)" % (
-            self._iterations,
-            search,
-            list(self.seen),
-        )
+        return f"_BreadthFirstSearcher(iterations={self._iterations}, {search}, seen={list(self.seen)!r})"
 
     def get_state(self):
         """Get the current state of this searcher.
@@ -1630,14 +1631,6 @@ class _BreadthFirstSearcher:
             return revs, ghosts
 
 
-try:
-    from ._graph_rs import collapse_linear_regions, invert_parent_map
-except ImportError:
-    # Rust extensions not available
-    collapse_linear_regions = None
-    invert_parent_map = None
-
-
 class GraphThunkIdsToKeys:
     """Forwards calls about 'ids' to be about keys internally."""
 
@@ -1666,5 +1659,3 @@ class GraphThunkIdsToKeys:
 _counters = [0, 0, 0, 0, 0, 0, 0]
 
 # Import KnownGraph to make it available through this module for compatibility
-from ._known_graph_py import KnownGraph
-

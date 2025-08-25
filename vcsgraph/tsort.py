@@ -16,20 +16,12 @@
 
 """Topological sorting routines."""
 
-from . import graph as _mod_graph
-from ._known_graph_py import KnownGraph
+from .known_graph import KnownGraph
 
-__all__ = ["topo_sort"]
+__all__ = ["MergeSorter", "TopoSorter", "merge_sort", "topo_sort"]
 
 # The Rust implementations are optional
-try:
-    from ._graph_rs import MergeSorter, TopoSorter, merge_sort
-    __all__.extend(["MergeSorter", "TopoSorter", "merge_sort"])
-except ImportError:
-    # Rust extensions not available
-    MergeSorter = None
-    TopoSorter = None
-    merge_sort = None
+from ._graph_rs import MergeSorter, TopoSorter, merge_sort
 
 
 def topo_sort(graph):

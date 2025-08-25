@@ -17,10 +17,11 @@
 """Tests for the python and pyrex extensions of KnownGraph."""
 
 import pprint
+from unittest import TestCase
 
-from .. import errors, tests
-from ..graph import KnownGraph
-from ..revision import NULL_REVISION
+from .. import errors
+from ..graph import NULL_REVISION
+from ..known_graph import KnownGraph
 from . import test_graph
 
 #  a
@@ -33,7 +34,7 @@ from . import test_graph
 alt_merge = {b"a": [], b"b": [b"a"], b"c": [b"b"], b"d": [b"a", b"c"]}
 
 
-class TestCaseWithKnownGraph(tests.TestCase):
+class TestCaseWithKnownGraph(TestCase):
     def make_known_graph(self, ancestry):
         return KnownGraph(ancestry)
 

@@ -19,18 +19,26 @@
 
 class Error(Exception):
     """Base class for vcsgraph exceptions."""
+
     pass
 
 
 class UnsupportedOperation(Error):
     """Requested operation is not supported."""
+
     pass
 
 
 class GhostRevisionsHaveNoRevno(Error):
     """When searching for revnos, we encounter a ghost."""
-    
+
     def __init__(self, revision_id, ghost_revision_id):
+        """Initialize GhostRevisionsHaveNoRevno exception.
+
+        Args:
+            revision_id: The revision ID being searched for.
+            ghost_revision_id: The ghost revision ID encountered.
+        """
         self.revision_id = revision_id
         self.ghost_revision_id = ghost_revision_id
         super().__init__(
@@ -41,8 +49,14 @@ class GhostRevisionsHaveNoRevno(Error):
 
 class InvalidRevisionId(Error):
     """Invalid revision ID."""
-    
+
     def __init__(self, revision_id, client):
+        """Initialize InvalidRevisionId exception.
+
+        Args:
+            revision_id: The invalid revision ID.
+            client: The client that encountered the invalid revision.
+        """
         self.revision_id = revision_id
         self.client = client
         super().__init__(f"Invalid revision ID {revision_id!r}")
@@ -50,8 +64,14 @@ class InvalidRevisionId(Error):
 
 class NoCommonAncestor(Error):
     """No common ancestor found between revisions."""
-    
+
     def __init__(self, revision_a, revision_b):
+        """Initialize NoCommonAncestor exception.
+
+        Args:
+            revision_a: First revision ID.
+            revision_b: Second revision ID.
+        """
         self.revision_a = revision_a
         self.revision_b = revision_b
         super().__init__(
@@ -61,8 +81,30 @@ class NoCommonAncestor(Error):
 
 class RevisionNotPresent(Error):
     """Revision not present in the graph."""
-    
+
     def __init__(self, revision_id, graph):
+        """Initialize RevisionNotPresent exception.
+
+        Args:
+            revision_id: The revision ID not present in the graph.
+            graph: The graph object where the revision was not found.
+        """
         self.revision_id = revision_id
         self.graph = graph
         super().__init__(f"Revision {revision_id!r} not present in graph")
+
+
+class GraphCycleError(Error):
+    """Cycle detected in graph.
+
+    Raised when a cycle is detected in a directed graph that should be acyclic.
+    """
+
+    def __init__(self, graph):
+        """Initialize with the graph containing the cycle.
+
+        Args:
+            graph: The graph object that contains a cycle.
+        """
+        self.graph = graph
+        super().__init__(f"Cycle in graph {graph!r}")

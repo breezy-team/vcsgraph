@@ -8,13 +8,13 @@ from breezy import osutils
 
 class TestCaseInTempDir(TestCase):
     """Minimal TestCase that runs in a temporary directory.
-    
+
     Only implements the functionality actually needed by vcsgraph tests.
     """
 
     def setUp(self):
         super().setUp()
-        self.test_dir = tempfile.mkdtemp(prefix='vcsgraph_test_')
+        self.test_dir = tempfile.mkdtemp(prefix="vcsgraph_test_")
         self.original_dir = os.getcwd()
         os.chdir(self.test_dir)
 

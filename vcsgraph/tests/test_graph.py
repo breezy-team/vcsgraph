@@ -14,12 +14,16 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
 
-from breezy import tests
-from breezy.revision import NULL_REVISION
-from breezy.tests import TestCaseWithMemoryTransport
+from unittest import TestCase
 
 from .. import errors
-from .. import graph as _mod_graph
+from .. import (
+    graph as _mod_graph,
+)
+from .. import (
+    known_graph as _mod_known_graph,
+)
+from ..graph import NULL_REVISION
 
 # Ancestry 1:
 #
@@ -586,7 +590,7 @@ class SharedInstrumentedParentsProvider:
         return self._real_parents_provider.get_cached_parent_map(nodes)
 
 
-class TestGraphBase(tests.TestCase):
+class TestGraphBase(TestCase):
     def make_graph(self, ancestors):
         return _mod_graph.Graph(_mod_graph.DictParentsProvider(ancestors))
 
@@ -605,15 +609,9 @@ class TestGraphBase(tests.TestCase):
         return g
 
 
-class TestGraph(TestCaseWithMemoryTransport):
+class TestGraph(TestCase):
     def make_graph(self, ancestors):
         return _mod_graph.Graph(_mod_graph.DictParentsProvider(ancestors))
-
-    def prepare_memory_tree(self, location):
-        tree = self.make_branch_and_memory_tree(location)
-        tree.lock_write()
-        tree.add(".")
-        return tree
 
     def build_ancestry(self, tree, ancestors):
         """Create an ancestry as specified by a graph dict.
@@ -760,23 +758,6 @@ class TestGraph(TestCaseWithMemoryTransport):
     def test_lca_double_shortcut(self):
         graph = self.make_graph(double_shortcut)
         self.assertEqual(b"c", graph.find_unique_lca(b"f", b"g"))
-
-    def test_common_ancestor_two_repos(self):
-        """Ensure we do unique_lca using data from two repos."""
-        mainline_tree = self.prepare_memory_tree("mainline")
-        self.build_ancestry(mainline_tree, mainline)
-        self.addCleanup(mainline_tree.unlock)
-
-        # This is cheating, because the revisions in the graph are actually
-        # different revisions, despite having the same revision-id.
-        feature_tree = self.prepare_memory_tree("feature")
-        self.build_ancestry(feature_tree, feature_branch)
-        self.addCleanup(feature_tree.unlock)
-
-        graph = mainline_tree.branch.repository.get_graph(
-            feature_tree.branch.repository
-        )
-        self.assertEqual(b"rev2b", graph.find_unique_lca(b"rev2a", b"rev3b"))
 
     def test_graph_difference(self):
         graph = self.make_graph(ancestry_1)
@@ -1534,22 +1515,26 @@ class TestGraphFindDistanceToNull(TestGraphBase):
 
     def test_rev_is_ghost(self):
         graph = self.make_graph(ancestry_1)
-        e = self.assertRaises(
-            errors.GhostRevisionsHaveNoRevno,
-            graph.find_distance_to_null,
-            b"rev_missing",
-            [],
-        )
-        self.assertEqual(b"rev_missing", e.revision_id)
-        self.assertEqual(b"rev_missing", e.ghost_revision_id)
+        try:
+            graph.find_distance_to_null(
+                b"rev_missing",
+                [],
+            )
+        except errors.GhostRevisionsHaveNoRevno as e:
+            self.assertEqual(b"rev_missing", e.revision_id)
+            self.assertEqual(b"rev_missing", e.ghost_revision_id)
+        else:
+            self.fail("Expected GhostRevisionsHaveNoRevno")
 
     def test_ancestor_is_ghost(self):
         graph = self.make_graph({b"rev": [b"parent"]})
-        e = self.assertRaises(
-            errors.GhostRevisionsHaveNoRevno, graph.find_distance_to_null, b"rev", []
-        )
-        self.assertEqual(b"rev", e.revision_id)
-        self.assertEqual(b"parent", e.ghost_revision_id)
+        try:
+            graph.find_distance_to_null(b"rev", [])
+        except errors.GhostRevisionsHaveNoRevno as e:
+            self.assertEqual(b"rev", e.revision_id)
+            self.assertEqual(b"parent", e.ghost_revision_id)
+        else:
+            self.fail("Expected GhostRevisionsHaveNoRevno")
 
     def test_known_in_ancestry(self):
         graph = self.make_graph(ancestry_1)
@@ -1660,7 +1645,7 @@ class TestGetChildMap(TestGraphBase):
         )
 
 
-class TestCachingParentsProvider(tests.TestCase):
+class TestCachingParentsProvider(TestCase):
     """Test CachingParentsProvider.
 
     These tests run with:
@@ -1725,7 +1710,7 @@ class TestCachingParentsProvider(tests.TestCase):
         self.assertEqual({b"a": (b"b",)}, self.caching_pp.get_cached_parent_map([b"a"]))
 
 
-class TestCachingParentsProviderExtras(tests.TestCaseWithTransport):
+class TestCachingParentsProviderExtras(TestCase):
     """Test the behaviour when parents are provided that were not requested."""
 
     def setUp(self):
@@ -1769,8 +1754,12 @@ class TestCachingParentsProviderExtras(tests.TestCaseWithTransport):
         self.assertIs(None, self.caching_pp._cache)
 
     def test_enable_cache_raises(self):
-        e = self.assertRaises(AssertionError, self.caching_pp.enable_cache)
-        self.assertEqual("Cache enabled when already enabled.", str(e))
+        try:
+            self.caching_pp.enable_cache()
+        except AssertionError as e:
+            self.assertEqual("Cache enabled when already enabled.", str(e))
+        else:
+            self.fail("Expected AssertionError")
 
     def test_cache_misses(self):
         self.caching_pp.get_parent_map([b"rev3"])
@@ -1800,7 +1789,7 @@ class TestCachingParentsProviderExtras(tests.TestCaseWithTransport):
         self.assertEqual([b"rev3"], self.inst_pp.calls)
 
 
-class TestCollapseLinearRegions(tests.TestCase):
+class TestCollapseLinearRegions(TestCase):
     def assertCollapsed(self, collapsed, original):
         self.assertEqual(collapsed, _mod_graph.collapse_linear_regions(original))
 
@@ -1836,7 +1825,7 @@ class TestCollapseLinearRegions(tests.TestCase):
         self.assertCollapsed(d, d)
 
 
-class TestGraphThunkIdsToKeys(tests.TestCase):
+class TestGraphThunkIdsToKeys(TestCase):
     def test_heads(self):
         # A
         # |\
@@ -1858,14 +1847,14 @@ class TestGraphThunkIdsToKeys(tests.TestCase):
 
     def test_add_node(self):
         d = {(b"C",): [(b"A",)], (b"B",): [(b"A",)], (b"A",): []}
-        g = _mod_graph.KnownGraph(d)
+        g = _mod_known_graph.KnownGraph(d)
         graph_thunk = _mod_graph.GraphThunkIdsToKeys(g)
         graph_thunk.add_node(b"D", [b"A", b"C"])
         self.assertEqual([b"B", b"D"], sorted(graph_thunk.heads([b"D", b"B", b"A"])))
 
     def test_merge_sort(self):
         d = {(b"C",): [(b"A",)], (b"B",): [(b"A",)], (b"A",): []}
-        g = _mod_graph.KnownGraph(d)
+        g = _mod_known_graph.KnownGraph(d)
         graph_thunk = _mod_graph.GraphThunkIdsToKeys(g)
         graph_thunk.add_node(b"D", [b"A", b"C"])
         self.assertEqual(
@@ -1877,7 +1866,7 @@ class TestGraphThunkIdsToKeys(tests.TestCase):
         )
 
 
-class TestStackedParentsProvider(tests.TestCase):
+class TestStackedParentsProvider(TestCase):
     def setUp(self):
         super().setUp()
         self.calls = []

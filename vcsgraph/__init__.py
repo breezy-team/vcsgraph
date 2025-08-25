@@ -22,21 +22,21 @@ version control systems, including:
 
 - Topological sorting (tsort)
 - Graph operations (graph)
-- Multi-parent handling (multiparent)
 """
 
 __all__ = [
-    'BaseVersionedFile',
-    'DictParentsProvider',
-    'FrozenHeadsCache',
-    'Graph',
-    'KnownGraph',
-    'MultiMemoryVersionedFile',
-    'MultiParent',
-    'MultiVersionedFile',
-    'invert_parent_map',
-    'topo_sort',
+    "BaseVersionedFile",
+    "DictParentsProvider",
+    "FrozenHeadsCache",
+    "Graph",
+    "KnownGraph",
+    "MultiMemoryVersionedFile",
+    "MultiVersionedFile",
+    "invert_parent_map",
+    "topo_sort",
 ]
+
+__version__ = (0, 1, 0)
 
 # Re-export commonly used functions and classes
 from .graph import (
@@ -45,11 +45,5 @@ from .graph import (
     Graph,
     invert_parent_map,
 )
-from ._known_graph_py import KnownGraph
-from .multiparent import (
-    BaseVersionedFile,
-    MultiMemoryVersionedFile,
-    MultiParent,
-    MultiVersionedFile,
-)
+from .known_graph import KnownGraph
 from .tsort import topo_sort

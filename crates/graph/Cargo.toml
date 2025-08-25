@@ -1,5 +1,5 @@
 [package]
-name = "breezy-graph"
+name = "vcsgraph-graph"
 version = "3.4.0"
 authors = [ "Martin Packman <gzlist@googlemail.com>", "Jelmer Vernooij <jelmer@jelmer.uk>"]
 edition = "2021"

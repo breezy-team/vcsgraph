@@ -18,11 +18,10 @@
 """Tests for topological sort."""
 
 import pprint
-
-from breezy.tests import TestCase
+from unittest import TestCase
 
 from ..errors import GraphCycleError
-from ..revision import NULL_REVISION
+from ..graph import NULL_REVISION
 from ..tsort import MergeSorter, TopoSorter, merge_sort, topo_sort
 
 

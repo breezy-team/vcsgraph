@@ -8,4 +8,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { workspace = true, features = ["extension-module"]}
-breezy-graph = { path = "../graph", features = ["pyo3"] }
+vcsgraph-graph = { path = "../graph", features = ["pyo3"] }
