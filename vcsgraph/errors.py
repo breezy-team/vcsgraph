@@ -47,6 +47,14 @@ class GhostRevisionsHaveNoRevno(Error):
         )
 
     def __eq__(self, other):
+        """Check equality with another GhostRevisionsHaveNoRevno instance.
+
+        Args:
+            other: Object to compare with.
+
+        Returns:
+            True if both instances have the same revision_id and ghost_revision_id.
+        """
         if not isinstance(other, GhostRevisionsHaveNoRevno):
             return False
         return (
@@ -70,6 +78,14 @@ class InvalidRevisionId(Error):
         super().__init__(f"Invalid revision ID {revision_id!r}")
 
     def __eq__(self, other):
+        """Check equality with another InvalidRevisionId instance.
+
+        Args:
+            other: Object to compare with.
+
+        Returns:
+            True if both instances have the same revision_id and client.
+        """
         if not isinstance(other, InvalidRevisionId):
             return False
         return self.revision_id == other.revision_id and self.client == other.client
@@ -92,6 +108,14 @@ class NoCommonAncestor(Error):
         )
 
     def __eq__(self, other):
+        """Check equality with another NoCommonAncestor instance.
+
+        Args:
+            other: Object to compare with.
+
+        Returns:
+            True if both instances have the same revision_a and revision_b.
+        """
         if not isinstance(other, NoCommonAncestor):
             return False
         return (
@@ -114,6 +138,14 @@ class RevisionNotPresent(Error):
         super().__init__(f"Revision {revision_id!r} not present in graph")
 
     def __eq__(self, other):
+        """Check equality with another RevisionNotPresent instance.
+
+        Args:
+            other: Object to compare with.
+
+        Returns:
+            True if both instances have the same revision_id and graph.
+        """
         if not isinstance(other, RevisionNotPresent):
             return False
         return self.revision_id == other.revision_id and self.graph == other.graph
@@ -135,6 +167,14 @@ class GraphCycleError(Error):
         super().__init__(f"Cycle in graph {graph!r}")
 
     def __eq__(self, other):
+        """Check equality with another GraphCycleError instance.
+
+        Args:
+            other: Object to compare with.
+
+        Returns:
+            True if both instances have the same graph.
+        """
         if not isinstance(other, GraphCycleError):
             return False
         return self.graph == other.graph
