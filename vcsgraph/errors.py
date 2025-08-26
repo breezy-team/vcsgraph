@@ -46,6 +46,14 @@ class GhostRevisionsHaveNoRevno(Error):
             f"cannot determine revno for {revision_id!r}"
         )
 
+    def __eq__(self, other):
+        if not isinstance(other, GhostRevisionsHaveNoRevno):
+            return False
+        return (
+            self.revision_id == other.revision_id
+            and self.ghost_revision_id == other.ghost_revision_id
+        )
+
 
 class InvalidRevisionId(Error):
     """Invalid revision ID."""
@@ -60,6 +68,11 @@ class InvalidRevisionId(Error):
         self.revision_id = revision_id
         self.client = client
         super().__init__(f"Invalid revision ID {revision_id!r}")
+
+    def __eq__(self, other):
+        if not isinstance(other, InvalidRevisionId):
+            return False
+        return self.revision_id == other.revision_id and self.client == other.client
 
 
 class NoCommonAncestor(Error):
@@ -78,6 +91,13 @@ class NoCommonAncestor(Error):
             f"No common ancestor found between {revision_a!r} and {revision_b!r}"
         )
 
+    def __eq__(self, other):
+        if not isinstance(other, NoCommonAncestor):
+            return False
+        return (
+            self.revision_a == other.revision_a and self.revision_b == other.revision_b
+        )
+
 
 class RevisionNotPresent(Error):
     """Revision not present in the graph."""
@@ -92,6 +112,11 @@ class RevisionNotPresent(Error):
         self.revision_id = revision_id
         self.graph = graph
         super().__init__(f"Revision {revision_id!r} not present in graph")
+
+    def __eq__(self, other):
+        if not isinstance(other, RevisionNotPresent):
+            return False
+        return self.revision_id == other.revision_id and self.graph == other.graph
 
 
 class GraphCycleError(Error):
@@ -108,3 +133,8 @@ class GraphCycleError(Error):
         """
         self.graph = graph
         super().__init__(f"Cycle in graph {graph!r}")
+
+    def __eq__(self, other):
+        if not isinstance(other, GraphCycleError):
+            return False
+        return self.graph == other.graph
