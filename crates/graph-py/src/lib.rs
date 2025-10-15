@@ -11,11 +11,11 @@ use std::hash::Hash;
 
 import_exception!(vcsgraph.errors, GraphCycleError);
 
-struct PyNode(PyObject);
+struct PyNode(Py<PyAny>);
 
 impl std::fmt::Debug for PyNode {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let repr = self.0.bind(py).repr();
             if PyErr::occurred(py) {
                 return Err(std::fmt::Error);
@@ -31,7 +31,7 @@ impl std::fmt::Debug for PyNode {
 
 impl std::fmt::Display for PyNode {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let repr = self.0.bind(py).repr();
             if PyErr::occurred(py) {
                 return Err(std::fmt::Error);
@@ -47,12 +47,12 @@ impl std::fmt::Display for PyNode {
 
 impl Clone for PyNode {
     fn clone(&self) -> PyNode {
-        Python::with_gil(|py| PyNode(self.0.clone_ref(py)))
+        Python::attach(|py| PyNode(self.0.clone_ref(py)))
     }
 }
 
-impl From<PyObject> for PyNode {
-    fn from(obj: PyObject) -> PyNode {
+impl From<Py<PyAny>> for PyNode {
+    fn from(obj: Py<PyAny>) -> PyNode {
         PyNode(obj)
     }
 }
@@ -83,7 +83,7 @@ impl<'py> IntoPyObject<'py> for PyNode {
 
 impl Hash for PyNode {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        Python::with_gil(|py| match self.0.bind(py).hash() {
+        Python::attach(|py| match self.0.bind(py).hash() {
             Err(err) => err.restore(py),
             Ok(hash) => state.write_isize(hash),
         });
@@ -92,7 +92,7 @@ impl Hash for PyNode {
 
 impl PartialEq for PyNode {
     fn eq(&self, other: &PyNode) -> bool {
-        Python::with_gil(|py| match self.0.bind(py).eq(other.0.bind(py)) {
+        Python::attach(|py| match self.0.bind(py).eq(other.0.bind(py)) {
             Err(err) => {
                 err.restore(py);
                 false
@@ -112,7 +112,7 @@ impl PartialOrd for PyNode {
 
 impl Ord for PyNode {
     fn cmp(&self, other: &PyNode) -> std::cmp::Ordering {
-        Python::with_gil(|py| match self.0.bind(py).lt(other.0.bind(py)) {
+        Python::attach(|py| match self.0.bind(py).lt(other.0.bind(py)) {
             Err(err) => {
                 err.restore(py);
                 std::cmp::Ordering::Equal
@@ -172,7 +172,7 @@ struct PyParentsProvider {
 
 #[pymethods]
 impl PyParentsProvider {
-    fn get_parent_map(&mut self, py: Python, keys: PyObject) -> PyResult<ParentMap<PyNode>> {
+    fn get_parent_map(&mut self, py: Python, keys: Py<PyAny>) -> PyResult<ParentMap<PyNode>> {
         let mut hash_key: HashSet<PyNode> = HashSet::new();
         for key in keys.bind(py).try_iter()? {
             hash_key.insert(key?.into());
@@ -204,7 +204,7 @@ struct TopoSorter {
 #[pymethods]
 impl TopoSorter {
     #[new]
-    fn new(py: Python, graph: PyObject) -> PyResult<TopoSorter> {
+    fn new(py: Python, graph: Py<PyAny>) -> PyResult<TopoSorter> {
         let iter = if graph.bind(py).is_instance_of::<PyDict>() {
             graph
                 .downcast_bound::<PyDict>(py)?
@@ -214,7 +214,7 @@ impl TopoSorter {
             graph.bind(py).try_iter()?
         };
         let graph = iter
-            .map(|k| k?.extract::<(PyObject, Vec<PyObject>)>())
+            .map(|k| k?.extract::<(Py<PyAny>, Vec<Py<PyAny>>)>())
             .map(|k| k.map(|(k, vs)| (PyNode::from(k), vs.into_iter().map(PyNode::from).collect())))
             .collect::<PyResult<Vec<(PyNode, Vec<PyNode>)>>>()?;
 
@@ -222,7 +222,7 @@ impl TopoSorter {
         Ok(TopoSorter { sorter })
     }
 
-    fn __next__(&mut self, py: Python) -> PyResult<Option<PyObject>> {
+    fn __next__(&mut self, py: Python) -> PyResult<Option<Py<PyAny>>> {
         match self.sorter.next() {
             None => Ok(None),
             Some(Ok(node)) => Ok(Some(node.into_pyobject(py)?.unbind())),
@@ -239,7 +239,7 @@ impl TopoSorter {
         slf
     }
 
-    fn sorted(&mut self, py: Python) -> PyResult<Vec<PyObject>> {
+    fn sorted(&mut self, py: Python) -> PyResult<Vec<Py<PyAny>>> {
         let mut ret = Vec::new();
         while let Some(node) = self.__next__(py)? {
             ret.push(node);
@@ -248,7 +248,7 @@ impl TopoSorter {
     }
 }
 
-fn revno_vec_to_py(py: Python, revno: RevnoVec) -> PyObject {
+fn revno_vec_to_py(py: Python, revno: RevnoVec) -> Py<PyAny> {
     PyTuple::new(py, revno.into_iter().map(|v| v.into_pyobject(py).unwrap()))
         .unwrap()
         .into_any()
@@ -260,7 +260,7 @@ struct MergeSorter {
     sorter: vcsgraph_graph::tsort::MergeSorter<PyNode>,
 }
 
-fn branch_tip_is_null(py: Python, branch_tip: PyObject) -> bool {
+fn branch_tip_is_null(py: Python, branch_tip: Py<PyAny>) -> bool {
     if let Ok(branch_tip) = branch_tip.extract::<&[u8]>(py) {
         branch_tip == b"null:"
     } else if let Ok((branch_tip,)) = branch_tip.extract::<(Vec<u8>,)>(py) {
@@ -276,9 +276,9 @@ impl MergeSorter {
     #[pyo3(signature = (graph, branch_tip=None, mainline_revisions=None, generate_revno=false))]
     fn new(
         py: Python,
-        graph: PyObject,
-        mut branch_tip: Option<PyObject>,
-        mainline_revisions: Option<PyObject>,
+        graph: Py<PyAny>,
+        mut branch_tip: Option<Py<PyAny>>,
+        mainline_revisions: Option<Py<PyAny>>,
         generate_revno: Option<bool>,
     ) -> PyResult<MergeSorter> {
         let iter = if graph.bind(py).is_instance_of::<PyDict>() {
@@ -290,7 +290,7 @@ impl MergeSorter {
             graph.bind(py).try_iter()?
         };
         let graph = iter
-            .map(|k| k?.extract::<(PyObject, Vec<PyObject>)>())
+            .map(|k| k?.extract::<(Py<PyAny>, Vec<Py<PyAny>>)>())
             .map(|k| k.map(|(k, vs)| (PyNode::from(k), vs.into_iter().map(PyNode::from).collect())))
             .collect::<PyResult<HashMap<PyNode, Vec<PyNode>>>>()?;
 
@@ -298,8 +298,8 @@ impl MergeSorter {
             let mainline_revisions = mainline_revisions
                 .bind(py)
                 .try_iter()?
-                .map(|k| k?.extract::<PyObject>())
-                .collect::<PyResult<Vec<PyObject>>>()?;
+                .map(|k| k?.extract::<Py<PyAny>>())
+                .collect::<PyResult<Vec<Py<PyAny>>>>()?;
             Some(mainline_revisions.into_iter().map(PyNode::from).collect())
         } else {
             None
@@ -321,7 +321,7 @@ impl MergeSorter {
         Ok(MergeSorter { sorter })
     }
 
-    fn __next__(&mut self, py: Python) -> PyResult<Option<PyObject>> {
+    fn __next__(&mut self, py: Python) -> PyResult<Option<Py<PyAny>>> {
         match self.sorter.next() {
             None => Ok(None),
             Some(Ok((sequence_number, node, merge_depth, None, end_of_merge))) => Ok(Some(
@@ -399,9 +399,9 @@ impl MergeSorter {
 #[pyo3(signature = (graph, branch_tip=None, mainline_revisions=None, generate_revno=false))]
 fn merge_sort(
     py: Python,
-    graph: PyObject,
-    branch_tip: Option<PyObject>,
-    mainline_revisions: Option<PyObject>,
+    graph: Py<PyAny>,
+    branch_tip: Option<Py<PyAny>>,
+    mainline_revisions: Option<Py<PyAny>>,
     generate_revno: Option<bool>,
 ) -> PyResult<Bound<PyList>> {
     let mut sorter = MergeSorter::new(py, graph, branch_tip, mainline_revisions, generate_revno)?;

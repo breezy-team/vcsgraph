@@ -103,11 +103,5 @@ ignore = [
 convention = "google"
 
 [tool.cibuildwheel.linux]
-skip = "*-musllinux_* *cp314*"
+skip = "*-musllinux_*"
 archs = ["auto", "aarch64"]
-
-[tool.cibuildwheel.macos]
-skip = "*cp314*"
-
-[tool.cibuildwheel.windows]
-skip = "*cp314*"
