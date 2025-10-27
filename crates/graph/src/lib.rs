@@ -83,11 +83,11 @@ impl<'py, K: pyo3::IntoPyObject<'py> + Clone + PartialEq + Eq> pyo3::IntoPyObjec
 }
 
 #[cfg(feature = "pyo3")]
-impl<'a, K: pyo3::FromPyObject<'a> + Clone + PartialEq + Eq> pyo3::FromPyObject<'a> for Parents<K>
-where
-    K: 'a,
+impl<'py, K: pyo3::conversion::FromPyObjectOwned<'py> + Clone + PartialEq + Eq> pyo3::FromPyObject<'_, 'py> for Parents<K>
 {
-    fn extract_bound(obj: &pyo3::Bound<'a, pyo3::PyAny>) -> pyo3::PyResult<Self> {
+    type Error = pyo3::PyErr;
+
+    fn extract(obj: pyo3::Borrowed<'_, 'py, pyo3::PyAny>) -> Result<Self, Self::Error> {
         use pyo3::prelude::*;
         if obj.is_none() {
             Ok(Parents::Ghost)
@@ -217,19 +217,18 @@ impl<'py, K: pyo3::IntoPyObject<'py, Error = pyo3::PyErr> + Hash + Clone + Parti
 }
 
 #[cfg(feature = "pyo3")]
-impl<'a, K: pyo3::FromPyObject<'a> + Hash + Clone + PartialEq + Eq + 'a> pyo3::FromPyObject<'a>
-    for ParentMap<K>
+impl<'py, K> pyo3::FromPyObject<'_, 'py> for ParentMap<K>
 where
-    K: 'a,
+    K: for<'a> pyo3::FromPyObject<'a, 'py, Error = pyo3::PyErr> + Hash + Clone + PartialEq + Eq,
 {
-    fn extract_bound(obj: &pyo3::Bound<'a, pyo3::PyAny>) -> pyo3::PyResult<Self> {
+    type Error = pyo3::PyErr;
+
+    fn extract(obj: pyo3::Borrowed<'_, 'py, pyo3::PyAny>) -> Result<Self, Self::Error> {
         use pyo3::prelude::*;
         let dict = obj.downcast::<pyo3::types::PyDict>()?;
         let mut result = ParentMap::new();
         for (k, v) in dict.iter() {
-            let k = k.extract::<K>()?;
-            let v = v.extract::<Parents<K>>()?;
-            result.insert(k, v);
+            result.insert(k.extract()?, v.extract()?);
         }
         Ok(result)
     }
@@ -575,10 +574,12 @@ impl<'py> pyo3::IntoPyObject<'py> for RevnoVec {
 }
 
 #[cfg(feature = "pyo3")]
-impl<'source> pyo3::FromPyObject<'source> for RevnoVec {
-    fn extract_bound(ob: &pyo3::Bound<'source, pyo3::PyAny>) -> pyo3::PyResult<Self> {
+impl<'py> pyo3::FromPyObject<'_, 'py> for RevnoVec {
+    type Error = pyo3::PyErr;
+
+    fn extract(obj: pyo3::Borrowed<'_, 'py, pyo3::PyAny>) -> Result<Self, Self::Error> {
         use pyo3::prelude::*;
-        let tuple = ob.downcast::<pyo3::types::PyTuple>()?;
+        let tuple = obj.downcast::<pyo3::types::PyTuple>()?;
         let mut ret = RevnoVec::new();
         for r in tuple.iter() {
             ret.0.push(r.extract()?);

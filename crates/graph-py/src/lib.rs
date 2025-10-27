@@ -63,9 +63,11 @@ impl<'a> From<Bound<'a, PyAny>> for PyNode {
     }
 }
 
-impl FromPyObject<'_> for PyNode {
-    fn extract_bound(obj: &Bound<PyAny>) -> PyResult<Self> {
-        Ok(PyNode(obj.clone().unbind()))
+impl<'py> FromPyObject<'_, 'py> for PyNode {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'_, 'py, PyAny>) -> Result<Self, Self::Error> {
+        Ok(PyNode(obj.to_owned().unbind()))
     }
 }
 
@@ -207,7 +209,7 @@ impl TopoSorter {
     fn new(py: Python, graph: Py<PyAny>) -> PyResult<TopoSorter> {
         let iter = if graph.bind(py).is_instance_of::<PyDict>() {
             graph
-                .downcast_bound::<PyDict>(py)?
+                .cast_bound::<PyDict>(py)?
                 .call_method0("items")?
                 .try_iter()?
         } else {
@@ -283,7 +285,7 @@ impl MergeSorter {
     ) -> PyResult<MergeSorter> {
         let iter = if graph.bind(py).is_instance_of::<PyDict>() {
             graph
-                .downcast_bound::<PyDict>(py)?
+                .cast_bound::<PyDict>(py)?
                 .call_method0("items")?
                 .try_iter()?
         } else {
@@ -298,7 +300,10 @@ impl MergeSorter {
             let mainline_revisions = mainline_revisions
                 .bind(py)
                 .try_iter()?
-                .map(|k| k?.extract::<Py<PyAny>>())
+                .map(|k| {
+                    let item = k?;
+                    Ok(item.extract::<Py<PyAny>>()?)
+                })
                 .collect::<PyResult<Vec<Py<PyAny>>>>()?;
             Some(mainline_revisions.into_iter().map(PyNode::from).collect())
         } else {
