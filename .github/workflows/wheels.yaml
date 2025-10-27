@@ -129,7 +129,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install twine
       - name: Download wheels
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v6
       - name: Publish wheels
         env:
           TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
