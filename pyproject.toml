@@ -12,7 +12,7 @@ dynamic = ["version"]
 [project.optional-dependencies]
 dev = [
     "mypy==1.19.1",
-    "ruff==0.14.8"
+    "ruff==0.14.9"
 ]
 
 [tool.setuptools]
