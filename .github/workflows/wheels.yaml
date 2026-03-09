@@ -83,7 +83,7 @@ jobs:
         run: pip install -U gpg
         if: "matrix.os == 'macos-latest'"
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
         if: "matrix.os == 'ubuntu-latest'"
       - name: Build wheels
         run: python -m cibuildwheel --output-dir wheelhouse
