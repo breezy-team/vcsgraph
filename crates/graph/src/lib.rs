@@ -225,7 +225,7 @@ where
 
     fn extract(obj: pyo3::Borrowed<'_, 'py, pyo3::PyAny>) -> Result<Self, Self::Error> {
         use pyo3::prelude::*;
-        let dict = obj.downcast::<pyo3::types::PyDict>()?;
+        let dict = obj.cast::<pyo3::types::PyDict>()?;
         let mut result = ParentMap::new();
         for (k, v) in dict.iter() {
             result.insert(k.extract()?, v.extract()?);
@@ -579,7 +579,7 @@ impl<'py> pyo3::FromPyObject<'_, 'py> for RevnoVec {
 
     fn extract(obj: pyo3::Borrowed<'_, 'py, pyo3::PyAny>) -> Result<Self, Self::Error> {
         use pyo3::prelude::*;
-        let tuple = obj.downcast::<pyo3::types::PyTuple>()?;
+        let tuple = obj.cast::<pyo3::types::PyTuple>()?;
         let mut ret = RevnoVec::new();
         for r in tuple.iter() {
             ret.0.push(r.extract()?);
