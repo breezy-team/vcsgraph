@@ -36,7 +36,7 @@ __all__ = [
     "topo_sort",
 ]
 
-__version__ = (0, 1, 1)
+__version__ = (0, 1, 2)
 
 # Re-export commonly used functions and classes
 from .graph import (
