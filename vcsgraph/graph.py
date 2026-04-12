@@ -237,15 +237,7 @@ class Graph:
         :param revisions: A set of revision_ids
         :return: A set of revision_ids with the children removed
         """
-        simple_ancestors = set(revisions)
-        for revision, parent_ids in parent_map.items():
-            if parent_ids is None:
-                continue
-            for parent_id in parent_ids:
-                if parent_id in revisions:
-                    simple_ancestors.discard(revision)
-                    break
-        return simple_ancestors
+        return self._rs._remove_simple_descendants(revisions, parent_map)
 
     def get_child_map(self, keys):
         """Get a mapping from parents to children of the specified keys.

@@ -1609,6 +1609,52 @@ impl PyGraph {
         pynodes_to_pyset(py, result)
     }
 
+    /// Remove revisions which are children of other ones in the set.
+    ///
+    /// This doesn't do any graph searching, it just checks the immediate
+    /// parent_map to find if there are any children which can be removed.
+    ///
+    /// :param revisions: A set of revision_ids
+    /// :param parent_map: A mapping `{key: parents}` — the value may be
+    ///     a list, tuple, or None (for ghosts).
+    /// :return: A set of revision_ids with the children removed
+    fn _remove_simple_descendants<'py>(
+        &self,
+        py: Python<'py>,
+        revisions: Py<PyAny>,
+        parent_map: Py<PyAny>,
+    ) -> PyResult<Bound<'py, pyo3::types::PySet>> {
+        let revs: std::collections::HashSet<PyNode> = {
+            let mut s = std::collections::HashSet::new();
+            for item in revisions.bind(py).try_iter()? {
+                s.insert(PyNode::from(item?));
+            }
+            s
+        };
+        // Walk parent_map.items() Python-side so we accept any dict-like
+        // mapping, tuples or lists as the value.
+        let items = parent_map.bind(py).call_method0("items")?;
+        let mut simple = revs.clone();
+        for item in items.try_iter()? {
+            let item = item?;
+            let key: Py<PyAny> = item.get_item(0)?.unbind();
+            let parents = item.get_item(1)?;
+            if parents.is_none() {
+                continue;
+            }
+            for parent in parents.try_iter()? {
+                let parent = parent?;
+                let parent_node = PyNode::from(parent.unbind());
+                if revs.contains(&parent_node) {
+                    simple.remove(&PyNode::from(key.clone_ref(py)));
+                    break;
+                }
+            }
+        }
+        let items: Vec<Py<PyAny>> = simple.into_iter().map(|n| n.0).collect();
+        pyo3::types::PySet::new(py, items)
+    }
+
     /// Find ancestors of `new_key` that may be descendants of `old_key`.
     fn _find_descendant_ancestors<'py>(
         &self,
