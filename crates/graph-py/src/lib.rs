@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
 
+use vcs_graph::bfs::BfsState;
 use vcs_graph::graph::{Graph as RsGraph, GraphError};
 use vcs_graph::known_graph::KnownGraph as RsKnownGraph;
 use vcs_graph::{ChildMap, ParentMap, Parents, ParentsProvider, RevnoVec};
@@ -982,6 +983,195 @@ fn graph_error_to_py(e: GraphError<PyNode>) -> PyErr {
     }
 }
 
+/// Helper: convert a set of PyNodes into a Python `set()`.
+fn pynodes_to_pyset<'py>(
+    py: Python<'py>,
+    set: rustc_hash::FxHashSet<PyNode>,
+) -> PyResult<Bound<'py, pyo3::types::PySet>> {
+    let items: Vec<Py<PyAny>> = set.into_iter().map(|n| n.0).collect();
+    pyo3::types::PySet::new(py, items)
+}
+
+/// Python binding for [`BfsState`]. Owns its own adapter over a Python
+/// parents provider and holds the Rust BFS state as sibling fields.
+///
+/// `dict=true` gives the class a `__dict__`, which lets the existing Python
+/// callers in `graph.py` stash a `_label` attribute on the instance for
+/// debug logging. This can be removed once Phase 4 (heads / border
+/// ancestors) no longer relies on it.
+#[pyclass(name = "_BreadthFirstSearcher", dict)]
+struct PyBFSearcher {
+    state: BfsState<PyNode>,
+    adapter: PyParentsProviderAdapter,
+}
+
+#[pymethods]
+impl PyBFSearcher {
+    #[new]
+    fn new(py: Python, revisions: Py<PyAny>, parents_provider: Py<PyAny>) -> PyResult<Self> {
+        let mut revs: Vec<PyNode> = Vec::new();
+        for item in revisions.bind(py).try_iter()? {
+            revs.push(PyNode::from(item?));
+        }
+        Ok(PyBFSearcher {
+            state: BfsState::new(revs),
+            adapter: PyParentsProviderAdapter {
+                provider: parents_provider,
+            },
+        })
+    }
+
+    /// `seen` attribute — matches the Python API. Returns a set snapshot.
+    #[getter]
+    fn seen<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PySet>> {
+        pynodes_to_pyset(py, self.state.seen.clone())
+    }
+
+    /// `_next_query` attribute — the current search frontier.
+    ///
+    /// Read-only snapshot. Existing callers in `graph.py` iterate and
+    /// truth-test this attribute but do not mutate it.
+    #[getter]
+    fn _next_query<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PySet>> {
+        pynodes_to_pyset(py, self.state.next_query().clone())
+    }
+
+    /// `_iterations` attribute — number of advance steps performed.
+    #[getter]
+    fn _iterations(&self) -> usize {
+        self.state.iterations()
+    }
+
+    /// Python `step` returns the next query set, or `()` on StopIteration.
+    fn step<'py>(&mut self, py: Python<'py>) -> PyResult<Py<PyAny>> {
+        match self.state.next_set(&self.adapter) {
+            Some(set) => Ok(pynodes_to_pyset(py, set)?.into_any().unbind()),
+            None => Ok(pyo3::types::PyTuple::empty(py).into_any().unbind()),
+        }
+    }
+
+    fn __next__<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PySet>> {
+        match self.state.next_set(&self.adapter) {
+            Some(set) => pynodes_to_pyset(py, set),
+            None => Err(pyo3::exceptions::PyStopIteration::new_err(())),
+        }
+    }
+
+    fn next<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PySet>> {
+        self.__next__(py)
+    }
+
+    fn next_with_ghosts<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<(
+        Bound<'py, pyo3::types::PySet>,
+        Bound<'py, pyo3::types::PySet>,
+    )> {
+        match self.state.next_with_ghosts(&self.adapter) {
+            Some((present, ghosts)) => Ok((
+                pynodes_to_pyset(py, present)?,
+                pynodes_to_pyset(py, ghosts)?,
+            )),
+            None => Err(pyo3::exceptions::PyStopIteration::new_err(())),
+        }
+    }
+
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn get_state<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<(
+        Bound<'py, pyo3::types::PySet>,
+        Bound<'py, pyo3::types::PySet>,
+        Bound<'py, pyo3::types::PySet>,
+    )> {
+        let (started, excludes, included) = self.state.get_state(&self.adapter);
+        Ok((
+            pynodes_to_pyset(py, started)?,
+            pynodes_to_pyset(py, excludes)?,
+            pynodes_to_pyset(py, included)?,
+        ))
+    }
+
+    fn find_seen_ancestors<'py>(
+        &self,
+        py: Python<'py>,
+        revisions: Py<PyAny>,
+    ) -> PyResult<Bound<'py, pyo3::types::PySet>> {
+        let mut revs: Vec<PyNode> = Vec::new();
+        for item in revisions.bind(py).try_iter()? {
+            revs.push(PyNode::from(item?));
+        }
+        let result = self.state.find_seen_ancestors(revs, &self.adapter);
+        pynodes_to_pyset(py, result)
+    }
+
+    fn stop_searching_any<'py>(
+        &mut self,
+        py: Python<'py>,
+        revisions: Py<PyAny>,
+    ) -> PyResult<Bound<'py, pyo3::types::PySet>> {
+        let mut revs: Vec<PyNode> = Vec::new();
+        for item in revisions.bind(py).try_iter()? {
+            revs.push(PyNode::from(item?));
+        }
+        let stopped = self.state.stop_searching_any(revs);
+        pynodes_to_pyset(py, stopped)
+    }
+
+    fn start_searching(&mut self, py: Python, revisions: Py<PyAny>) -> PyResult<Py<PyAny>> {
+        let mut revs: Vec<PyNode> = Vec::new();
+        for item in revisions.bind(py).try_iter()? {
+            revs.push(PyNode::from(item?));
+        }
+        match self.state.start_searching(revs, &self.adapter) {
+            Some((present, ghosts)) => {
+                let pres = pynodes_to_pyset(py, present)?;
+                let gh = pynodes_to_pyset(py, ghosts)?;
+                Ok(
+                    pyo3::types::PyTuple::new(py, [pres.into_any(), gh.into_any()])?
+                        .into_any()
+                        .unbind(),
+                )
+            }
+            // In Next mode Python returns None (the function has no explicit
+            // return), which matches our None here.
+            None => Ok(py.None()),
+        }
+    }
+
+    fn __repr__(&self, py: Python) -> PyResult<String> {
+        let prefix = if self.state.iterations() > 0 {
+            "searching"
+        } else {
+            "starting"
+        };
+        let seen_repr =
+            pyo3::types::PyList::new(py, self.state.seen.iter().map(|n| n.0.clone_ref(py)))?
+                .repr()?;
+        let next_repr = {
+            let next_keys: Vec<Py<PyAny>> = self
+                .state
+                .started_keys
+                .iter()
+                .map(|n| n.0.clone_ref(py))
+                .collect();
+            pyo3::types::PyList::new(py, next_keys)?.repr()?
+        };
+        Ok(format!(
+            "_BreadthFirstSearcher(iterations={}, {}={}, seen={})",
+            self.state.iterations(),
+            prefix,
+            next_repr,
+            seen_repr
+        ))
+    }
+}
+
 #[pymodule]
 fn _graph_rs(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(invert_parent_map))?;
@@ -995,5 +1185,6 @@ fn _graph_rs(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_class::<PyKnownGraphNode>()?;
     m.add_class::<PyKnownGraphNodesView>()?;
     m.add_class::<PyGraph>()?;
+    m.add_class::<PyBFSearcher>()?;
     Ok(())
 }

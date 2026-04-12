@@ -23,7 +23,12 @@ import logging
 import time
 
 from . import errors
-from ._graph_rs import _RustGraph, collapse_linear_regions, invert_parent_map
+from ._graph_rs import (
+    _BreadthFirstSearcher as _RustBreadthFirstSearcher,
+    _RustGraph,
+    collapse_linear_regions,
+    invert_parent_map,
+)
 
 # NULL_REVISION constant
 NULL_REVISION = b"null:"
@@ -733,7 +738,7 @@ class Graph:
         return result
 
     def _make_breadth_first_searcher(self, revisions):
-        return _BreadthFirstSearcher(revisions, self)
+        return _RustBreadthFirstSearcher(revisions, self)
 
     def _find_border_ancestors(self, revisions):
         """Find common ancestors with at least one uncommon descendant.

@@ -8,4 +8,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { workspace = true, features = ["extension-module"]}
+rustc-hash = "2"
 vcs-graph = { path = "../graph", features = ["pyo3"] }
