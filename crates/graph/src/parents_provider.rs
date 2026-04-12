@@ -27,11 +27,10 @@ impl<K: Hash + Eq + Clone> ParentsProvider<K> for StackedParentsProvider<K> {
             }
 
             let new_found = parent_provider.get_parent_map(&remaining);
+            for k in new_found.keys() {
+                remaining.remove(k);
+            }
             found.extend(new_found);
-            remaining = remaining
-                .difference(&found.keys().cloned().collect())
-                .cloned()
-                .collect();
         }
 
         found

@@ -29,7 +29,7 @@ impl<K: Eq + Hash + std::fmt::Debug + Clone> TopoSorter<K> {
     pub fn new(graph: impl Iterator<Item = (K, Vec<K>)>) -> TopoSorter<K> {
         let mut g = HashMap::new();
         for (node, parents) in graph {
-            g.insert(node, parents.into_iter().collect());
+            g.insert(node, parents);
         }
         let visitable = g.keys().cloned().collect();
         TopoSorter {
@@ -422,28 +422,26 @@ impl<K: Eq + Hash + Clone + std::fmt::Debug> MergeSorter<K> {
         self.pending_parents_stack.pop().unwrap();
 
         let parents = self.original_graph.get(&node_name).unwrap();
-        let mut parent_revno = None;
-        if !parents.is_empty() {
-            // node has parents, assign from the left most parent.
-            parent_revno = if let Some(entry) = self.revnos.get(&parents[0]) {
-                entry.0.clone()
-            } else {
-                // Left-hand parent is a ghost, consider it not to exist
-                None
-            };
-        }
+        // Left-hand parent's revno, if it exists and isn't a ghost.
+        let parent_revno = parents
+            .first()
+            .and_then(|p| self.revnos.get(p))
+            .and_then(|entry| entry.0.clone());
         let revno: RevnoVec = if let Some(parent_revno) = parent_revno {
-            if first_child.is_none() || !first_child.unwrap() {
+            if first_child == Some(true) {
+                // as the first child, we just increase the final revision number
+                parent_revno.bump_last()
+            } else {
                 // not the first child, make a new branch
                 let base_revno = parent_revno[0];
-                let mut branch_count = *self.revno_to_branch_count.get(&base_revno).unwrap_or(&0);
-                branch_count += 1;
+                let branch_count = self
+                    .revno_to_branch_count
+                    .get(&base_revno)
+                    .copied()
+                    .unwrap_or(0)
+                    + 1;
                 self.revno_to_branch_count.insert(base_revno, branch_count);
                 parent_revno.new_branch(branch_count)
-            } else {
-                // as the first child, we just increase the final revision
-                // number
-                parent_revno.bump_last()
             }
         } else {
             // no parents, use the root sequence
@@ -545,51 +543,35 @@ impl<K: Eq + Hash + std::fmt::Debug + Clone> Iterator for MergeSorter<K> {
         if let Err(err) = self.build() {
             return Some(Err(err));
         }
-        if let Some((node_name, merge_depth, revno)) = self.scheduled_nodes.pop() {
-            if self.stop_revision.is_some() && &node_name == self.stop_revision.as_ref().unwrap() {
+        let (node_name, merge_depth, revno) = self.scheduled_nodes.pop()?;
+        if let Some(stop) = self.stop_revision.as_ref() {
+            if &node_name == stop {
                 return None;
             }
-            let end_of_merge: bool;
-            if self.scheduled_nodes.is_empty() {
-                // last revision is the end of a merge
-                end_of_merge = true;
-            } else if self.scheduled_nodes.last().unwrap().1 < merge_depth {
-                // the next node is to our left
-                end_of_merge = true;
-            } else if self.scheduled_nodes.last().unwrap().1 == merge_depth
-                && !self
-                    .original_graph
-                    .get(&node_name)
-                    .unwrap()
-                    .contains(&self.scheduled_nodes.last().unwrap().0)
-            {
-                // the next node was part of a multiple-merge.
-                end_of_merge = true;
-            } else {
-                end_of_merge = false;
-            }
-            let result = if self.generate_revno {
-                (
-                    self.sequence_number,
-                    node_name,
-                    merge_depth,
-                    Some(revno),
-                    end_of_merge,
-                )
-            } else {
-                (
-                    self.sequence_number,
-                    node_name,
-                    merge_depth,
-                    None,
-                    end_of_merge,
-                )
-            };
-            self.sequence_number += 1;
-            Some(Ok(result))
-        } else {
-            None
         }
+        let end_of_merge = match self.scheduled_nodes.last() {
+            // last revision is the end of a merge
+            None => true,
+            // the next node is to our left
+            Some((_, next_depth, _)) if *next_depth < merge_depth => true,
+            // the next node was part of a multiple-merge
+            Some((next_name, next_depth, _)) if *next_depth == merge_depth => !self
+                .original_graph
+                .get(&node_name)
+                .unwrap()
+                .contains(next_name),
+            _ => false,
+        };
+        let revno_out = self.generate_revno.then_some(revno);
+        let result = (
+            self.sequence_number,
+            node_name,
+            merge_depth,
+            revno_out,
+            end_of_merge,
+        );
+        self.sequence_number += 1;
+        Some(Ok(result))
     }
 }
 

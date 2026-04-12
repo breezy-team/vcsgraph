@@ -1,5 +1,4 @@
 #![allow(clippy::if_same_then_else)]
-use std::borrow::Borrow;
 /// DIAGRAM of terminology
 ///       A
 ///       /\
@@ -56,6 +55,16 @@ impl<K: Clone + PartialEq + Eq> Parents<K> {
         }
     }
 
+    /// Borrow the known parents as a slice without cloning.
+    ///
+    /// Panics if this is a `Ghost`.
+    pub fn as_slice(&self) -> &[K] {
+        match self {
+            Parents::Ghost => panic!("as_slice called on Ghost"),
+            Parents::Known(v) => v.as_slice(),
+        }
+    }
+
     pub fn as_ref(&self) -> Parents<&K> {
         match self {
             Parents::Ghost => Parents::Ghost,
@@ -83,7 +92,8 @@ impl<'py, K: pyo3::IntoPyObject<'py> + Clone + PartialEq + Eq> pyo3::IntoPyObjec
 }
 
 #[cfg(feature = "pyo3")]
-impl<'py, K: pyo3::conversion::FromPyObjectOwned<'py> + Clone + PartialEq + Eq> pyo3::FromPyObject<'_, 'py> for Parents<K>
+impl<'py, K: pyo3::conversion::FromPyObjectOwned<'py> + Clone + PartialEq + Eq>
+    pyo3::FromPyObject<'_, 'py> for Parents<K>
 {
     type Error = pyo3::PyErr;
 
@@ -335,7 +345,7 @@ pub fn invert_parent_map<K: Hash + Eq + Clone>(parent_map: &ParentMap<K>) -> Chi
         if parents.is_ghost() {
             continue;
         }
-        for p in parents.unwrap().iter() {
+        for p in parents.as_slice() {
             child_map.add(p.clone(), child.clone());
         }
     }
@@ -433,7 +443,7 @@ pub fn collapse_linear_regions<K: Hash + Eq + Clone>(parent_map: &ParentMap<K>) 
     let mut children: HashMap<K, Vec<K>> = HashMap::new();
     for (child, parents) in parent_map.iter() {
         children.entry(child.clone()).or_default();
-        for p in parents.unwrap().iter() {
+        for p in parents.as_slice() {
             children.entry(p.clone()).or_default().push(child.clone());
         }
     }
@@ -441,33 +451,38 @@ pub fn collapse_linear_regions<K: Hash + Eq + Clone>(parent_map: &ParentMap<K>) 
     let mut removed = HashSet::new();
     let mut result: ParentMap<K> = parent_map.clone();
     for node in parent_map.keys() {
-        let node = node.borrow();
-        let parents = result.get(node).unwrap().unwrap();
-        if parents.len() == 1 {
-            let parent_children = children.get(&parents[0]).unwrap();
-            if parent_children.len() != 1 {
-                // This is not the only child
-                continue;
-            }
-            let node_children = children.get(node).unwrap();
-            if node_children.len() != 1 {
-                continue;
-            }
-            if let Some(child_parents) = result.get(&node_children[0]) {
-                if child_parents.unwrap().len() != 1 {
-                    // This is not its only parent
-                    continue;
-                }
-                // The child of this node only points at it, and the parent only has
-                // this as a child. remove this node, and join the others together
-                let parents = parents.clone();
-                result.remove(node);
-                result.insert(node_children[0].clone(), Parents::Known(parents.clone()));
-                children.insert(parents[0].clone(), node_children.clone());
-                children.remove(node);
-                removed.insert(node);
-            }
+        let parents = result.get(node).unwrap().as_slice();
+        if parents.len() != 1 {
+            continue;
         }
+        let parent_children = children.get(&parents[0]).unwrap();
+        if parent_children.len() != 1 {
+            // This is not the only child
+            continue;
+        }
+        let node_children = children.get(node).unwrap();
+        if node_children.len() != 1 {
+            continue;
+        }
+        let Some(child_parents) = result.get(&node_children[0]) else {
+            continue;
+        };
+        if child_parents.as_slice().len() != 1 {
+            // This is not its only parent
+            continue;
+        }
+        // The child of this node only points at it, and the parent only has
+        // this as a child. Remove this node and splice around it.
+        let parents_owned = parents.to_vec();
+        let node_children_owned = node_children.clone();
+        result.remove(node);
+        result.insert(
+            node_children_owned[0].clone(),
+            Parents::Known(parents_owned.clone()),
+        );
+        children.insert(parents_owned[0].clone(), node_children_owned);
+        children.remove(node);
+        removed.insert(node);
     }
 
     result
@@ -488,8 +503,7 @@ impl RevnoVec {
 
     pub fn bump_last(&self) -> Self {
         let mut ret = self.clone();
-        let last_index = ret.0.len() - 1;
-        ret.0[last_index] += 1;
+        *ret.0.last_mut().expect("bump_last on empty RevnoVec") += 1;
         ret
     }
 
