@@ -110,7 +110,7 @@ impl<K: Hash + Eq + Clone> BfsState<K> {
         provider: &P,
     ) -> (FxHashSet<K>, FxHashSet<K>, FxHashSet<K>) {
         let next_query = if self.returning == ReturnMode::Next {
-            let result = self.do_query(&self.next_query.clone(), provider);
+            let result = Self::do_query(&mut self.seen, &self.next_query, provider);
             // Undo the `seen` updates the preview made.
             for k in &result.next {
                 self.seen.remove(k);
@@ -169,8 +169,10 @@ impl<K: Hash + Eq + Clone> BfsState<K> {
 
     fn advance<P: ParentsProvider<K>>(&mut self, provider: &P) {
         self.iterations += 1;
-        let nq = self.next_query.clone();
-        let result = self.do_query(&nq, provider);
+        // Split borrow: `do_query` only needs to read `next_query` and
+        // write `seen`, so we pass them as separate references and avoid
+        // cloning `next_query` on every advance.
+        let result = Self::do_query(&mut self.seen, &self.next_query, provider);
         self.current_present = result.found;
         self.current_ghosts = result.ghosts;
         self.next_query = result.next;
@@ -181,11 +183,11 @@ impl<K: Hash + Eq + Clone> BfsState<K> {
     }
 
     fn do_query<P: ParentsProvider<K>>(
-        &mut self,
+        seen: &mut FxHashSet<K>,
         revisions: &FxHashSet<K>,
         provider: &P,
     ) -> QueryResult<K> {
-        self.seen.extend(revisions.iter().cloned());
+        seen.extend(revisions.iter().cloned());
 
         // ParentsProvider takes a std HashSet by reference.
         let mut std_set: HashSet<K> = HashSet::with_capacity(revisions.len());
@@ -203,7 +205,7 @@ impl<K: Hash + Eq + Clone> BfsState<K> {
                 Parents::Known(ps) => {
                     parents_owned.insert(rev_id.clone(), ps.clone());
                     for p in ps {
-                        if !self.seen.contains(p) {
+                        if !seen.contains(p) {
                             parents_of_found.insert(p.clone());
                         }
                     }
@@ -354,7 +356,7 @@ impl<K: Hash + Eq + Clone> BfsState<K> {
             self.seen.extend(new_revisions);
             None
         } else {
-            let result = self.do_query(&revisions, provider);
+            let result = Self::do_query(&mut self.seen, &revisions, provider);
             self.stopped_keys.extend(result.ghosts.iter().cloned());
             self.current_present.extend(result.found.iter().cloned());
             self.current_ghosts.extend(result.ghosts.iter().cloned());
