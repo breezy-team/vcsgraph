@@ -143,103 +143,110 @@ impl<K: Eq + Hash + std::fmt::Debug + Clone> Iterator for TopoSorter<K> {
 ///
 /// The result is a list sorted so that all parents come before
 /// their children. Each element of the list is a tuple containing:
-/// (sequence_number, node_name, merge_depth, end_of_merge)
-///  * sequence_number: The sequence of this row in the output. Useful for
-///    GUIs.
-///  * node_name: The node name: opaque text to the merge routine.
-///  * merge_depth: How many levels of merging deep this node has been
-///    found.
-///  * revno_sequence: When requested this field provides a sequence of
-///      revision numbers for all revisions. The format is:
-///      (REVNO, BRANCHNUM, BRANCHREVNO). BRANCHNUM is the number of the
-///      branch that the revno is on. From left to right the REVNO numbers
-///      are the sequence numbers within that branch of the revision.
-///      For instance, the graph {A:[], B:['A'], C:['A', 'B']} will get
-///      the following revno_sequences assigned: A:(1,), B:(1,1,1), C:(2,).
-///      This should be read as 'A is the first commit in the trunk',
-///      'B is the first commit on the first branch made from A', 'C is the
-///      second commit in the trunk'.
-///  * end_of_merge: When True the next node is part of a different merge.
+/// `(sequence_number, node_name, merge_depth, end_of_merge)`.
 ///
+/// - `sequence_number`: the sequence of this row in the output. Useful for
+///   GUIs.
+/// - `node_name`: the node name; opaque text to the merge routine.
+/// - `merge_depth`: how many levels of merging deep this node has been found.
+/// - `revno_sequence`: when requested this field provides a sequence of
+///   revision numbers for all revisions. The format is
+///   `(REVNO, BRANCHNUM, BRANCHREVNO)`. `BRANCHNUM` is the number of the
+///   branch that the revno is on. From left to right the `REVNO` numbers
+///   are the sequence numbers within that branch of the revision.
+///   For instance, the graph `{A:[], B:['A'], C:['A', 'B']}` will get
+///   the following revno sequences assigned: `A:(1,), B:(1,1,1), C:(2,)`.
+///   This should be read as 'A is the first commit in the trunk',
+///   'B is the first commit on the first branch made from A', 'C is the
+///   second commit in the trunk'.
+/// - `end_of_merge`: when true the next node is part of a different merge.
 ///
-/// node identifiers can be any hashable object, and are typically strings.
+/// Node identifiers can be any hashable object, and are typically strings.
 ///
-/// If you have a graph like [('a', ['b']), ('a', ['c'])] this will only use
-/// one of the two values for 'a'.
+/// If you have a graph like `[('a', ['b']), ('a', ['c'])]` this will only
+/// use one of the two values for 'a'.
 ///
-/// The graph is sorted lazily: until you iterate or sort the input is
-/// not processed other than to create an internal representation.
+/// The graph is sorted lazily: until you iterate or sort the input is not
+/// processed other than to create an internal representation.
 ///
-/// iteration or sorting may raise GraphCycleError if a cycle is present
-/// in the graph.
+/// Iteration or sorting may raise a cycle error if a cycle is present in
+/// the graph.
 ///
-/// Background information on the design:
-/// -------------------------------------
-/// definition: the end of any cluster or 'merge' occurs when:
-///     1 - the next revision has a lower merge depth than we do.
-///       i.e.
-///       A 0
-///       B  1
-///       C   2
-///       D  1
-///       E 0
-///       C, D are the ends of clusters, E might be but we need more data.
-///     2 - or the next revision at our merge depth is not our left most
-///       ancestor.
-///       This is required to handle multiple-merges in one commit.
-///       i.e.
-///       A 0    [F, B, E]
-///       B  1   [D, C]
-///       C   2  [D]
-///       D  1   [F]
-///       E  1   [F]
-///       F 0
-///       C is the end of a cluster due to rule 1.
-///       D is not the end of a cluster from rule 1, but is from rule 2: E
-///         is not its left most ancestor
-///       E is the end of a cluster due to rule 1
-///       F might be but we need more data.
+/// # Background on the design
 ///
-/// we show connecting lines to a parent when:
-///  - The parent is the start of a merge within this cluster.
-///    That is, the merge was not done to the mainline before this cluster
-///    was merged to the mainline.
-///    This can be detected thus:
-///     * The parent has a higher merge depth and is the next revision in
-///       the list.
+/// The end of any cluster or 'merge' occurs when:
 ///
-///   The next revision in the list constraint is needed for this case:
+/// 1. the next revision has a lower merge depth than we do:
+///
+///    ```text
+///    A 0
+///    B  1
+///    C   2
+///    D  1
+///    E 0
+///    ```
+///
+///    C and D are the ends of clusters; E might be but we need more data.
+///
+/// 2. or the next revision at our merge depth is not our left most ancestor.
+///    This is required to handle multiple-merges in one commit:
+///
+///    ```text
+///    A 0    [F, B, E]
+///    B  1   [D, C]
+///    C   2  [D]
+///    D  1   [F]
+///    E  1   [F]
+///    F 0
+///    ```
+///
+///    C is the end of a cluster due to rule 1. D is not the end of a
+///    cluster from rule 1, but is from rule 2: E is not its left most
+///    ancestor. E is the end of a cluster due to rule 1. F might be but we
+///    need more data.
+///
+/// We show connecting lines to a parent when:
+///
+/// - The parent is the start of a merge within this cluster. That is, the
+///   merge was not done to the mainline before this cluster was merged to
+///   the mainline. This can be detected thus: the parent has a higher
+///   merge depth and is the next revision in the list. The next-revision
+///   constraint is needed for this case:
+///
+///   ```text
 ///   A 0   [D, B]
 ///   B  1  [C, F]   # we do not want to show a line to F which is depth 2
-///                    but not a merge
+///                  # but not a merge
 ///   C  1  [H]      # note that this is a long line to show back to the
-///                    ancestor - see the end of merge rules.
+///                  # ancestor - see the end of merge rules.
 ///   D 0   [G, E]
 ///   E  1  [G, F]
 ///   F   2 [G]
 ///   G  1  [H]
 ///   H 0
-///  - Part of this merges 'branch':
-///   The parent has the same merge depth and is our left most parent and we
-///    are not the end of the cluster.
+///   ```
+///
+/// - Part of this merge's branch: the parent has the same merge depth and
+///   is our left most parent and we are not the end of the cluster:
+///
+///   ```text
 ///   A 0   [C, B] lines: [B, C]
 ///   B  1  [E, C] lines: [C]
 ///   C 0   [D]    lines: [D]
 ///   D 0   [F, E] lines: [E, F]
 ///   E  1  [F]    lines: [F]
 ///   F 0
-///  - The end of this merge/cluster:
-///   we can ONLY have multiple parents at the end of a cluster if this
-///   branch was previously merged into the 'mainline'.
-///   - if we have one and only one parent, show it
-///     Note that this may be to a greater merge depth - for instance if
-///     this branch continued from a deeply nested branch to add something
-///     to it.
-///   - if we have more than one parent - show the second oldest (older ==
-///     further down the list) parent with
-///     an equal or lower merge depth
-///      XXXX revisit when awake. ddaa asks about the relevance of each one
-///      - maybe more than one parent is relevant
+///   ```
+///
+/// - The end of this merge/cluster: we can only have multiple parents at
+///   the end of a cluster if this branch was previously merged into the
+///   'mainline'.
+///
+///   - If we have one and only one parent, show it. Note that this may be
+///     to a greater merge depth — for instance if this branch continued
+///     from a deeply nested branch to add something to it.
+///   - If we have more than one parent, show the second oldest (older ==
+///     further down the list) parent with an equal or lower merge depth.
 pub struct MergeSorter<K> {
     // this is a stack storing the depth first search into the graph.
     node_name_stack: Vec<K>,
@@ -282,6 +289,13 @@ pub struct MergeSorter<K> {
     scheduled_nodes: Vec<(K, usize, RevnoVec)>,
     sequence_number: usize,
 }
+
+/// A single row emitted by [`MergeSorter`].
+///
+/// Fields in order: sequence number, node name, merge depth, optional revno
+/// sequence, and an end-of-merge flag. See the [`MergeSorter`] docs for the
+/// meaning of each field.
+pub type MergeSortRow<K> = (usize, K, usize, Option<RevnoVec>, bool);
 
 impl<K: Eq + Hash + Clone + std::fmt::Debug> MergeSorter<K> {
     pub fn new(
@@ -367,9 +381,7 @@ impl<K: Eq + Hash + Clone + std::fmt::Debug> MergeSorter<K> {
     /// Sort the graph and return as a list.
     ///
     /// After calling this the sorter is empty and you must create a new one.
-    pub fn sorted(
-        &mut self,
-    ) -> std::result::Result<Vec<(usize, K, usize, Option<RevnoVec>, bool)>, Error<K>> {
+    pub fn sorted(&mut self) -> std::result::Result<Vec<MergeSortRow<K>>, Error<K>> {
         self.iter_topo_order().collect()
     }
 
@@ -378,8 +390,7 @@ impl<K: Eq + Hash + Clone + std::fmt::Debug> MergeSorter<K> {
     /// iteration.
     pub fn iter_topo_order(
         &mut self,
-    ) -> impl Iterator<Item = std::result::Result<(usize, K, usize, Option<RevnoVec>, bool), Error<K>>>
-           + '_ {
+    ) -> impl Iterator<Item = std::result::Result<MergeSortRow<K>, Error<K>>> + '_ {
         self
     }
 
@@ -536,10 +547,8 @@ impl<K: Eq + Hash + Clone + std::fmt::Debug> MergeSorter<K> {
 }
 
 impl<K: Eq + Hash + std::fmt::Debug + Clone> Iterator for MergeSorter<K> {
-    type Item = std::result::Result<(usize, K, usize, Option<RevnoVec>, bool), Error<K>>;
-    fn next(
-        &mut self,
-    ) -> Option<std::result::Result<(usize, K, usize, Option<RevnoVec>, bool), Error<K>>> {
+    type Item = std::result::Result<MergeSortRow<K>, Error<K>>;
+    fn next(&mut self) -> Option<Self::Item> {
         if let Err(err) = self.build() {
             return Some(Err(err));
         }
@@ -580,6 +589,6 @@ pub fn merge_sort<K: Eq + Hash + std::fmt::Debug + Clone>(
     branch_tip: Option<K>,
     mainline_revisions: Option<Vec<K>>,
     generate_revno: bool,
-) -> std::result::Result<Vec<(usize, K, usize, Option<RevnoVec>, bool)>, Error<K>> {
+) -> std::result::Result<Vec<MergeSortRow<K>>, Error<K>> {
     MergeSorter::new(graph, branch_tip, mainline_revisions, generate_revno).sorted()
 }
