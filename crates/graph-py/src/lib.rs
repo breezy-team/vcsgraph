@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 
-use vcsgraph_graph::{ChildMap, ParentMap, RevnoVec};
+use vcs_graph::{ChildMap, ParentMap, RevnoVec};
 
 use pyo3::import_exception;
 use pyo3::prelude::*;
@@ -145,7 +145,7 @@ impl Ord for PyNode {
 /// Given a map from child => parents, create a map of parent => children
 #[pyfunction]
 fn invert_parent_map(parent_map: ParentMap<PyNode>) -> ChildMap<PyNode> {
-    vcsgraph_graph::invert_parent_map::<PyNode>(&parent_map)
+    vcs_graph::invert_parent_map::<PyNode>(&parent_map)
 }
 
 /// Collapse regions of the graph that are 'linear'.
@@ -162,14 +162,14 @@ fn invert_parent_map(parent_map: ParentMap<PyNode>) -> ChildMap<PyNode> {
 /// :return: Another dictionary with 'linear' chains collapsed
 #[pyfunction]
 fn collapse_linear_regions(parent_map: ParentMap<PyNode>) -> PyResult<ParentMap<PyNode>> {
-    Ok(vcsgraph_graph::collapse_linear_regions::<PyNode>(
+    Ok(vcs_graph::collapse_linear_regions::<PyNode>(
         &parent_map,
     ))
 }
 
 #[pyclass]
 struct PyParentsProvider {
-    provider: Box<dyn vcsgraph_graph::ParentsProvider<PyNode> + Send + Sync>,
+    provider: Box<dyn vcs_graph::ParentsProvider<PyNode> + Send + Sync>,
 }
 
 #[pymethods]
@@ -191,7 +191,7 @@ fn DictParentsProvider(
     parent_map: ParentMap<PyNode>,
 ) -> PyResult<Bound<'_, PyParentsProvider>> {
     let provider = PyParentsProvider {
-        provider: Box::new(vcsgraph_graph::DictParentsProvider::<PyNode>::new(
+        provider: Box::new(vcs_graph::DictParentsProvider::<PyNode>::new(
             parent_map,
         )),
     };
@@ -200,7 +200,7 @@ fn DictParentsProvider(
 
 #[pyclass]
 struct TopoSorter {
-    sorter: vcsgraph_graph::tsort::TopoSorter<PyNode>,
+    sorter: vcs_graph::tsort::TopoSorter<PyNode>,
 }
 
 #[pymethods]
@@ -220,7 +220,7 @@ impl TopoSorter {
             .map(|k| k.map(|(k, vs)| (PyNode::from(k), vs.into_iter().map(PyNode::from).collect())))
             .collect::<PyResult<Vec<(PyNode, Vec<PyNode>)>>>()?;
 
-        let sorter = vcsgraph_graph::tsort::TopoSorter::<PyNode>::new(graph.into_iter());
+        let sorter = vcs_graph::tsort::TopoSorter::<PyNode>::new(graph.into_iter());
         Ok(TopoSorter { sorter })
     }
 
@@ -228,7 +228,7 @@ impl TopoSorter {
         match self.sorter.next() {
             None => Ok(None),
             Some(Ok(node)) => Ok(Some(node.into_pyobject(py)?.unbind())),
-            Some(Err(vcsgraph_graph::Error::Cycle(e))) => Err(GraphCycleError::new_err(e)),
+            Some(Err(vcs_graph::Error::Cycle(e))) => Err(GraphCycleError::new_err(e)),
             Some(Err(e)) => panic!("Unexpected error: {:?}", e),
         }
     }
@@ -259,7 +259,7 @@ fn revno_vec_to_py(py: Python, revno: RevnoVec) -> Py<PyAny> {
 
 #[pyclass]
 struct MergeSorter {
-    sorter: vcsgraph_graph::tsort::MergeSorter<PyNode>,
+    sorter: vcs_graph::tsort::MergeSorter<PyNode>,
 }
 
 fn branch_tip_is_null(py: Python, branch_tip: Py<PyAny>) -> bool {
@@ -317,7 +317,7 @@ impl MergeSorter {
             }
         }
 
-        let sorter = vcsgraph_graph::tsort::MergeSorter::<PyNode>::new(
+        let sorter = vcs_graph::tsort::MergeSorter::<PyNode>::new(
             graph,
             branch_tip.map(PyNode::from),
             mainline_revisions,
@@ -353,7 +353,7 @@ impl MergeSorter {
                     .unbind()
                     .into(),
             )),
-            Some(Err(vcsgraph_graph::Error::Cycle(e))) => Err(GraphCycleError::new_err(e)),
+            Some(Err(vcs_graph::Error::Cycle(e))) => Err(GraphCycleError::new_err(e)),
             Some(Err(e)) => panic!("Unexpected error: {:?}", e),
         }
     }
