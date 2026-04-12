@@ -326,24 +326,11 @@ class Graph:
 
     def find_descendants(self, old_key, new_key):
         """Find descendants of old_key that are ancestors of new_key."""
-        child_map = self.get_child_map(
-            self._find_descendant_ancestors(old_key, new_key)
-        )
-        graph = Graph(DictParentsProvider(child_map))
-        searcher = graph._make_breadth_first_searcher([old_key])
-        list(searcher)
-        return searcher.seen
+        return self._rs.find_descendants(old_key, new_key)
 
     def _find_descendant_ancestors(self, old_key, new_key):
         """Find ancestors of new_key that may be descendants of old_key."""
-        stop = self._make_breadth_first_searcher([old_key])
-        descendants = self._make_breadth_first_searcher([new_key])
-        for revisions in descendants:
-            old_stop = stop.seen.intersection(revisions)
-            descendants.stop_searching_any(old_stop)
-            seen_stop = descendants.find_seen_ancestors(stop.step())
-            descendants.stop_searching_any(seen_stop)
-        return descendants.seen.difference(stop.seen)
+        return self._rs._find_descendant_ancestors(old_key, new_key)
 
     def get_child_map(self, keys):
         """Get a mapping from parents to children of the specified keys.

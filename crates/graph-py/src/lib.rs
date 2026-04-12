@@ -962,6 +962,32 @@ impl PyGraph {
         Ok(d)
     }
 
+    /// Find descendants of `old_key` that are ancestors of `new_key`.
+    fn find_descendants<'py>(
+        &self,
+        py: Python<'py>,
+        old_key: Py<PyAny>,
+        new_key: Py<PyAny>,
+    ) -> PyResult<Bound<'py, pyo3::types::PySet>> {
+        let old = PyNode::from(old_key);
+        let new = PyNode::from(new_key);
+        let result = self.inner.find_descendants(old, new);
+        pynodes_to_pyset(py, result)
+    }
+
+    /// Find ancestors of `new_key` that may be descendants of `old_key`.
+    fn _find_descendant_ancestors<'py>(
+        &self,
+        py: Python<'py>,
+        old_key: Py<PyAny>,
+        new_key: Py<PyAny>,
+    ) -> PyResult<Bound<'py, pyo3::types::PySet>> {
+        let old = PyNode::from(old_key);
+        let new = PyNode::from(new_key);
+        let result = self.inner.find_descendant_ancestors(old, new);
+        pynodes_to_pyset(py, result)
+    }
+
     fn __repr__(&self, py: Python) -> PyResult<String> {
         let r = self.provider_py.bind(py).repr()?;
         Ok(format!("Graph({})", r))

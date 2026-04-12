@@ -5,11 +5,12 @@
 //! topological ordering (delegated to [`crate::tsort::TopoSorter`]), and the
 //! left-hand ancestry walks.
 
-use crate::parents_provider::ParentsProvider;
+use crate::bfs::BfsState;
+use crate::parents_provider::{DictParentsProvider, ParentsProvider};
 use crate::tsort::TopoSorter;
 use crate::{Error, ParentMap, Parents};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;
 
 /// A revision graph backed by an arbitrary [`ParentsProvider`].
@@ -312,6 +313,50 @@ where
         }
         result
     }
+
+    /// Find ancestors of `new_key` that may be descendants of `old_key`.
+    ///
+    /// Drives two parallel searchers: `stop` walks up from `old_key` and
+    /// `descendants` walks up from `new_key`. For each iteration, prune
+    /// nodes already seen by `stop` from `descendants`, then advance `stop`
+    /// and prune any nodes in the newly-visited stop set that `descendants`
+    /// has already reached (via `find_seen_ancestors`).
+    ///
+    /// Returns the set of keys reached by `descendants` but not by `stop`.
+    pub fn find_descendant_ancestors(&self, old_key: K, new_key: K) -> FxHashSet<K> {
+        let mut stop = BfsState::new([old_key]);
+        let mut descendants = BfsState::new([new_key]);
+        // Python's `for revisions in descendants:` iterates `next()` until
+        // StopIteration. Our next_set returns None to signal the end.
+        while let Some(revisions) = descendants.next_set(&self.provider) {
+            let old_stop: FxHashSet<K> = stop.seen.intersection(&revisions).cloned().collect();
+            descendants.stop_searching_any(old_stop);
+            let step = stop.next_set(&self.provider).unwrap_or_default();
+            let seen_stop = descendants.find_seen_ancestors(step, &self.provider);
+            descendants.stop_searching_any(seen_stop);
+        }
+        descendants.seen.difference(&stop.seen).cloned().collect()
+    }
+
+    /// Find descendants of `old_key` that are ancestors of `new_key`.
+    ///
+    /// Uses [`find_descendant_ancestors`](Self::find_descendant_ancestors)
+    /// to narrow down candidates, then walks forwards through the child
+    /// relationships by running a BFS over a [`DictParentsProvider`] built
+    /// from the inverted parent map.
+    pub fn find_descendants(&self, old_key: K, new_key: K) -> FxHashSet<K>
+    where
+        K: Ord,
+    {
+        let candidates = self.find_descendant_ancestors(old_key.clone(), new_key);
+        let child_map = self.get_child_map(candidates);
+        // Walk forwards via a DictParentsProvider built from the child map.
+        let dict: HashMap<K, Vec<K>> = child_map.into_iter().collect();
+        let provider = DictParentsProvider::from(dict);
+        let mut searcher = BfsState::new([old_key]);
+        while searcher.next_set(&provider).is_some() {}
+        searcher.seen
+    }
 }
 
 #[cfg(test)]
@@ -411,5 +456,36 @@ mod tests {
         let keys: FxHashSet<&'static str> = anc.iter().map(|(k, _)| *k).collect();
         let expected: FxHashSet<&'static str> = ["a", "b", "c", "d"].into_iter().collect();
         assert_eq!(keys, expected);
+    }
+
+    #[test]
+    fn find_descendants_diamond() {
+        //     a
+        //    / \
+        //   b   c
+        //    \ /
+        //     d
+        let g = make(&[("a", &[]), ("b", &["a"]), ("c", &["a"]), ("d", &["b", "c"])]);
+        let descendants = g.find_descendants("a", "d");
+        let expected: FxHashSet<&'static str> = ["a", "b", "c", "d"].into_iter().collect();
+        assert_eq!(descendants, expected);
+    }
+
+    #[test]
+    fn find_descendants_linear() {
+        // a <- b <- c <- d
+        let g = make(&[("a", &[]), ("b", &["a"]), ("c", &["b"]), ("d", &["c"])]);
+        let descendants = g.find_descendants("b", "d");
+        let expected: FxHashSet<&'static str> = ["b", "c", "d"].into_iter().collect();
+        assert_eq!(descendants, expected);
+    }
+
+    #[test]
+    fn find_descendants_unrelated() {
+        // new_key is not a descendant of old_key.
+        let g = make(&[("a", &[]), ("b", &["a"]), ("c", &["a"])]);
+        let descendants = g.find_descendants("b", "c");
+        // b is not reachable from c, so no descendants of b among c's ancestry.
+        assert!(descendants.is_empty() || descendants == ["b"].into_iter().collect());
     }
 }
