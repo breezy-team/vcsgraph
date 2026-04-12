@@ -16,15 +16,32 @@
 
 """Graph algorithms for version control systems."""
 
-__all__ = ["collapse_linear_regions", "invert_parent_map"]
+__all__ = [
+    "CachingParentsProvider",
+    "CallableToParentsProviderAdapter",
+    "DictParentsProvider",
+    "FrozenHeadsCache",
+    "GraphThunkIdsToKeys",
+    "HeadsCache",
+    "StackedParentsProvider",
+    "collapse_linear_regions",
+    "invert_parent_map",
+]
 
 from ._graph_rs import (
-    _BreadthFirstSearcher as _RustBreadthFirstSearcher,
-)
-from ._graph_rs import (
+    CachingParentsProvider,
+    CallableToParentsProviderAdapter,
+    DictParentsProvider,
+    FrozenHeadsCache,
+    GraphThunkIdsToKeys,
+    HeadsCache,
+    StackedParentsProvider,
     _RustGraph,
     collapse_linear_regions,
     invert_parent_map,
+)
+from ._graph_rs import (
+    _BreadthFirstSearcher as _RustBreadthFirstSearcher,
 )
 
 # NULL_REVISION constant
