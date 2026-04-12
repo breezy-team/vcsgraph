@@ -21,6 +21,8 @@ __all__ = ["collapse_linear_regions", "invert_parent_map"]
 from . import errors
 from ._graph_rs import (
     _BreadthFirstSearcher as _RustBreadthFirstSearcher,
+)
+from ._graph_rs import (
     _RustGraph,
     collapse_linear_regions,
     invert_parent_map,
@@ -383,12 +385,6 @@ class Graph:
         """
         return self._rs.find_unique_ancestors(unique_revision, common_revisions)
 
-
-
-
-
-
-
     def get_parent_map(self, revisions):  # type: ignore
         """Get a map of key:parent_list for revisions.
 
@@ -403,7 +399,6 @@ class Graph:
 
     def _make_breadth_first_searcher(self, revisions):
         return _RustBreadthFirstSearcher(revisions, self)
-
 
     def heads(self, keys):
         """Return the heads from amongst keys.
@@ -460,9 +455,7 @@ class Graph:
             (unique_lca, steps) where steps is the number of times that
             find_lca was run.  If False, only unique_lca is returned.
         """
-        return self._rs.find_unique_lca(
-            left_revision, right_revision, count_steps
-        )
+        return self._rs.find_unique_lca(left_revision, right_revision, count_steps)
 
     def iter_ancestry(self, revision_ids):
         """Iterate the ancestry of this revision.
@@ -525,8 +518,6 @@ class Graph:
         return self._rs.is_between(revid, lower_bound_revid, upper_bound_revid)
 
 
-
-
 class HeadsCache:
     """A cache of results for graph heads calls."""
 
@@ -583,8 +574,6 @@ class FrozenHeadsCache:
     def cache(self, keys, heads):
         """Store a known value."""
         self._heads[frozenset(keys)] = frozenset(heads)
-
-
 
 
 class GraphThunkIdsToKeys:
