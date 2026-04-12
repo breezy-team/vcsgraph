@@ -3,9 +3,13 @@ name = "vcs-graph"
 version = "3.4.0"
 authors = [ "Martin Packman <gzlist@googlemail.com>", "Jelmer Vernooij <jelmer@jelmer.uk>"]
 edition = "2021"
-description = "Graph introspection"
-license = "GPL-2.0+"
+description = "Graph algorithms for version control systems: topological sort, merge-aware sort, parent maps, and ancestry queries."
+license = "GPL-2.0-or-later"
 homepage = "https://www.breezy-vcs.org/"
+repository = "https://github.com/breezy-team/vcsgraph"
+readme = "README.md"
+keywords = ["vcs", "graph", "toposort", "dag", "breezy"]
+categories = ["algorithms", "data-structures"]
 
 [lib]
 
