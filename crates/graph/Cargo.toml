@@ -1,6 +1,6 @@
 [package]
 name = "vcs-graph"
-version = "3.4.0"
+version = "3.5.0"
 authors = [ "Martin Packman <gzlist@googlemail.com>", "Jelmer Vernooij <jelmer@jelmer.uk>"]
 edition = "2021"
 description = "Graph algorithms for version control systems: topological sort, merge-aware sort, parent maps, and ancestry queries."
