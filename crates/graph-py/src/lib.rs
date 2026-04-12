@@ -757,6 +757,154 @@ struct PyKnownGraphMergeSortNode {
     end_of_merge: bool,
 }
 
+/// Sort a collection of PyNodes by hash for use as a deterministic cache
+/// key. Collisions only hurt cache hit rate, not correctness, because two
+/// different sets can't produce identical sorted Vecs within a process.
+fn sort_pynodes_by_hash(items: impl IntoIterator<Item = PyNode>) -> Vec<PyNode> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut v: Vec<PyNode> = items.into_iter().collect();
+    v.sort_by_key(|n| {
+        let mut h = DefaultHasher::new();
+        n.hash(&mut h);
+        h.finish()
+    });
+    v
+}
+
+/// A cache of results for graph heads() calls.
+///
+/// The cache key is the unordered set of input keys; the value is the
+/// `.heads()` result for that set. Every call returns a fresh mutable set
+/// so callers can modify the result without affecting later lookups —
+/// matches `vcsgraph.graph.HeadsCache`.
+#[pyclass(name = "HeadsCache")]
+struct PyHeadsCache {
+    graph: Py<PyAny>,
+    cache: std::sync::Mutex<std::collections::HashMap<Vec<PyNode>, Vec<PyNode>>>,
+}
+
+#[pymethods]
+impl PyHeadsCache {
+    #[new]
+    fn new(graph: Py<PyAny>) -> Self {
+        PyHeadsCache {
+            graph,
+            cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// The underlying graph. Exposed so Python callers can reach
+    /// `cache.graph` just like the pure-Python version allowed.
+    #[getter]
+    fn graph(&self, py: Python) -> Py<PyAny> {
+        self.graph.clone_ref(py)
+    }
+
+    /// Return the heads of `keys`. The result is a mutable Python set;
+    /// callers may modify it without affecting future lookups.
+    fn heads<'py>(
+        &self,
+        py: Python<'py>,
+        keys: Py<PyAny>,
+    ) -> PyResult<Bound<'py, pyo3::types::PySet>> {
+        let nodes = extract_iter_pynodes(py, &keys)?;
+        let key = sort_pynodes_by_hash(nodes);
+        {
+            let cache = self.cache.lock().unwrap();
+            if let Some(cached) = cache.get(&key) {
+                return pyo3::types::PySet::new(py, cached.iter().map(|n| n.0.clone_ref(py)));
+            }
+        }
+        // Cache miss: delegate to the wrapped graph.
+        let result: Vec<PyNode> = {
+            let heads = self.graph.bind(py).call_method1(
+                "heads",
+                (pyo3::types::PyList::new(
+                    py,
+                    key.iter().map(|n| n.0.clone_ref(py)),
+                )?,),
+            )?;
+            let mut out = Vec::new();
+            for item in heads.try_iter()? {
+                out.push(PyNode::from(item?));
+            }
+            out
+        };
+        let mut cache = self.cache.lock().unwrap();
+        cache.insert(key, result.clone());
+        pyo3::types::PySet::new(py, result.into_iter().map(|n| n.0))
+    }
+}
+
+/// A cache of `heads()` results that returns frozen sets.
+///
+/// Same as [`PyHeadsCache`] but the results are immutable. Matches
+/// `vcsgraph.graph.FrozenHeadsCache`.
+#[pyclass(name = "FrozenHeadsCache")]
+struct PyFrozenHeadsCache {
+    graph: Py<PyAny>,
+    cache: std::sync::Mutex<std::collections::HashMap<Vec<PyNode>, Vec<PyNode>>>,
+}
+
+#[pymethods]
+impl PyFrozenHeadsCache {
+    #[new]
+    fn new(graph: Py<PyAny>) -> Self {
+        PyFrozenHeadsCache {
+            graph,
+            cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    #[getter]
+    fn graph(&self, py: Python) -> Py<PyAny> {
+        self.graph.clone_ref(py)
+    }
+
+    /// Return the heads of `keys` as a frozenset.
+    fn heads(&self, py: Python, keys: Py<PyAny>) -> PyResult<Py<PyAny>> {
+        let nodes = extract_iter_pynodes(py, &keys)?;
+        let key = sort_pynodes_by_hash(nodes);
+        {
+            let cache = self.cache.lock().unwrap();
+            if let Some(cached) = cache.get(&key) {
+                let fs = py.import("builtins")?.getattr("frozenset")?;
+                let items: Vec<Py<PyAny>> = cached.iter().map(|n| n.0.clone_ref(py)).collect();
+                return Ok(fs.call1((items,))?.into_any().unbind());
+            }
+        }
+        let result: Vec<PyNode> = {
+            let heads = self.graph.bind(py).call_method1(
+                "heads",
+                (pyo3::types::PyList::new(
+                    py,
+                    key.iter().map(|n| n.0.clone_ref(py)),
+                )?,),
+            )?;
+            let mut out = Vec::new();
+            for item in heads.try_iter()? {
+                out.push(PyNode::from(item?));
+            }
+            out
+        };
+        let mut cache = self.cache.lock().unwrap();
+        cache.insert(key, result.clone());
+        let fs = py.import("builtins")?.getattr("frozenset")?;
+        let items: Vec<Py<PyAny>> = result.into_iter().map(|n| n.0).collect();
+        Ok(fs.call1((items,))?.into_any().unbind())
+    }
+
+    /// Store a precomputed `(keys, heads)` pair directly in the cache.
+    fn cache(&self, py: Python, keys: Py<PyAny>, heads: Py<PyAny>) -> PyResult<()> {
+        let key_nodes = extract_iter_pynodes(py, &keys)?;
+        let head_nodes = extract_iter_pynodes(py, &heads)?;
+        let key = sort_pynodes_by_hash(key_nodes);
+        self.cache.lock().unwrap().insert(key, head_nodes);
+        Ok(())
+    }
+}
+
 /// Python binding for [`CachingParentsProvider`]. Wraps an inner Python
 /// parents provider (any object with a `get_parent_map(keys)` method) and
 /// caches every lookup so repeated queries don't re-hit the inner provider.
@@ -1621,5 +1769,7 @@ fn _graph_rs(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_class::<PyGraph>()?;
     m.add_class::<PyBFSearcher>()?;
     m.add_class::<PyCachingParentsProvider>()?;
+    m.add_class::<PyHeadsCache>()?;
+    m.add_class::<PyFrozenHeadsCache>()?;
     Ok(())
 }

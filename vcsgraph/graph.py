@@ -24,6 +24,8 @@ from ._graph_rs import (
 )
 from ._graph_rs import (
     CachingParentsProvider,
+    FrozenHeadsCache,
+    HeadsCache,
     _RustGraph,
     collapse_linear_regions,
     invert_parent_map,
@@ -426,64 +428,6 @@ class Graph:
         lower_bound_revid <= revid <= upper_bound_revid
         """
         return self._rs.is_between(revid, lower_bound_revid, upper_bound_revid)
-
-
-class HeadsCache:
-    """A cache of results for graph heads calls."""
-
-    def __init__(self, graph):
-        self.graph = graph
-        self._heads = {}
-
-    def heads(self, keys):
-        """Return the heads of keys.
-
-        This matches the API of Graph.heads(), specifically the return value is
-        a set which can be mutated, and ordering of the input is not preserved
-        in the output.
-
-        :see also: Graph.heads.
-        :param keys: The keys to calculate heads for.
-        :return: A set containing the heads, which may be mutated without
-            affecting future lookups.
-        """
-        keys = frozenset(keys)
-        try:
-            return set(self._heads[keys])
-        except KeyError:
-            heads = self.graph.heads(keys)
-            self._heads[keys] = heads
-            return set(heads)
-
-
-class FrozenHeadsCache:
-    """Cache heads() calls, assuming the caller won't modify them."""
-
-    def __init__(self, graph):
-        self.graph = graph
-        self._heads = {}
-
-    def heads(self, keys):
-        """Return the heads of keys.
-
-        Similar to Graph.heads(). The main difference is that the return value
-        is a frozen set which cannot be mutated.
-
-        :see also: Graph.heads.
-        :param keys: The keys to calculate heads for.
-        :return: A frozenset containing the heads.
-        """
-        keys = frozenset(keys)
-        try:
-            return self._heads[keys]
-        except KeyError:
-            heads = frozenset(self.graph.heads(keys))
-            self._heads[keys] = heads
-            return heads
-
-    def cache(self, keys, heads):
-        """Store a known value."""
-        self._heads[frozenset(keys)] = frozenset(heads)
 
 
 class GraphThunkIdsToKeys:
