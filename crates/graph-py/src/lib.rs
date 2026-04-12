@@ -1,7 +1,8 @@
 #![allow(non_snake_case)]
 
+use vcs_graph::graph::{Graph as RsGraph, GraphError};
 use vcs_graph::known_graph::KnownGraph as RsKnownGraph;
-use vcs_graph::{ChildMap, ParentMap, RevnoVec};
+use vcs_graph::{ChildMap, ParentMap, Parents, ParentsProvider, RevnoVec};
 
 use pyo3::import_exception;
 use pyo3::prelude::*;
@@ -752,6 +753,235 @@ struct PyKnownGraphMergeSortNode {
     end_of_merge: bool,
 }
 
+/// Adapter letting a Python parents provider satisfy Rust's `ParentsProvider`
+/// trait. Holds a raw `Py<PyAny>` and dispatches `get_parent_map(keys)` via
+/// the GIL.
+///
+/// The Python provider's `get_parent_map` must accept an iterable of keys
+/// and return a dict-like `{key: parents_list}` (missing keys are treated
+/// as ghosts). Any Python exception during the call is caught and converted
+/// to an empty response — matching the Python Graph's behavior of treating
+/// the provider as best-effort.
+struct PyParentsProviderAdapter {
+    provider: Py<PyAny>,
+}
+
+impl ParentsProvider<PyNode> for PyParentsProviderAdapter {
+    fn get_parent_map(&self, keys: &HashSet<PyNode>) -> ParentMap<PyNode> {
+        Python::attach(|py| {
+            let key_list = pyo3::types::PyList::empty(py);
+            for k in keys {
+                if key_list.append(k.0.bind(py)).is_err() {
+                    return ParentMap::new();
+                }
+            }
+            let result = match self
+                .provider
+                .bind(py)
+                .call_method1("get_parent_map", (key_list,))
+            {
+                Ok(r) => r,
+                Err(err) => {
+                    err.restore(py);
+                    return ParentMap::new();
+                }
+            };
+            result.extract::<ParentMap<PyNode>>().unwrap_or_default()
+        })
+    }
+}
+
+#[pyclass(name = "_RustGraph")]
+struct PyGraph {
+    inner: RsGraph<PyNode, PyParentsProviderAdapter>,
+    provider_py: Py<PyAny>,
+}
+
+fn extract_iter_pynodes(py: Python, obj: &Py<PyAny>) -> PyResult<Vec<PyNode>> {
+    let mut out = Vec::new();
+    for item in obj.bind(py).try_iter()? {
+        out.push(PyNode::from(item?));
+    }
+    Ok(out)
+}
+
+fn parent_map_to_pydict<'py>(
+    py: Python<'py>,
+    pm: ParentMap<PyNode>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    for (k, v) in pm {
+        match v {
+            Parents::Known(ps) => {
+                let list: Vec<Py<PyAny>> = ps.into_iter().map(|n| n.0).collect();
+                d.set_item(k.0, list)?;
+            }
+            Parents::Ghost => {
+                d.set_item(k.0, py.None())?;
+            }
+        }
+    }
+    Ok(d)
+}
+
+#[pymethods]
+impl PyGraph {
+    #[new]
+    fn new(py: Python, parents_provider: Py<PyAny>) -> PyResult<Self> {
+        let adapter = PyParentsProviderAdapter {
+            provider: parents_provider.clone_ref(py),
+        };
+        Ok(PyGraph {
+            inner: RsGraph::new(adapter),
+            provider_py: parents_provider,
+        })
+    }
+
+    /// Return the wrapped parents provider as given at construction time.
+    #[getter]
+    fn parents_provider(&self, py: Python) -> Py<PyAny> {
+        self.provider_py.clone_ref(py)
+    }
+
+    fn get_parent_map<'py>(
+        &self,
+        py: Python<'py>,
+        keys: Py<PyAny>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let nodes = extract_iter_pynodes(py, &keys)?;
+        let pm = self.inner.get_parent_map(nodes);
+        parent_map_to_pydict(py, pm)
+    }
+
+    fn get_child_map<'py>(&self, py: Python<'py>, keys: Py<PyAny>) -> PyResult<Bound<'py, PyDict>> {
+        let nodes = extract_iter_pynodes(py, &keys)?;
+        let cm = self.inner.get_child_map(nodes);
+        let d = PyDict::new(py);
+        for (parent, children) in cm {
+            let list: Vec<Py<PyAny>> = children.into_iter().map(|n| n.0).collect();
+            d.set_item(parent.0, list)?;
+        }
+        Ok(d)
+    }
+
+    fn iter_topo_order(&self, py: Python, revisions: Py<PyAny>) -> PyResult<Vec<Py<PyAny>>> {
+        let nodes = extract_iter_pynodes(py, &revisions)?;
+        self.inner
+            .iter_topo_order(nodes)
+            .map(|v| v.into_iter().map(|n| n.0).collect())
+            .map_err(|e| match e {
+                vcs_graph::Error::Cycle(_) => {
+                    GraphCycleError::new_err(("cycle in graph while iter_topo_order",))
+                }
+                other => pyo3::exceptions::PyValueError::new_err(format!("{:?}", other)),
+            })
+    }
+
+    /// Iterate the left-hand ancestry from `start_key` until a key in
+    /// `stop_keys` is hit (or the origin is reached).
+    #[pyo3(signature = (start_key, stop_keys=None))]
+    fn iter_lefthand_ancestry(
+        &self,
+        py: Python,
+        start_key: Py<PyAny>,
+        stop_keys: Option<Py<PyAny>>,
+    ) -> PyResult<Vec<Py<PyAny>>> {
+        let start = PyNode::from(start_key);
+        let stop: Vec<PyNode> = match stop_keys {
+            None => Vec::new(),
+            Some(obj) => {
+                let mut s = Vec::new();
+                for item in obj.bind(py).try_iter()? {
+                    s.push(PyNode::from(item?));
+                }
+                s
+            }
+        };
+        self.inner
+            .iter_lefthand_ancestry(start, stop)
+            .map(|v| v.into_iter().map(|n| n.0).collect())
+            .map_err(graph_error_to_py)
+    }
+
+    /// Iterate ancestry, yielding `(key, parents_list_or_None)` pairs.
+    fn iter_ancestry<'py>(
+        &self,
+        py: Python<'py>,
+        revision_ids: Py<PyAny>,
+    ) -> PyResult<Vec<Bound<'py, pyo3::types::PyTuple>>> {
+        let nodes = extract_iter_pynodes(py, &revision_ids)?;
+        let pairs = self.inner.iter_ancestry(nodes);
+        pairs
+            .into_iter()
+            .map(|(k, parents)| {
+                let parents_obj: Py<PyAny> = match parents {
+                    Parents::Known(ps) => {
+                        let list: Vec<Py<PyAny>> = ps.into_iter().map(|n| n.0).collect();
+                        pyo3::types::PyTuple::new(py, list)?.into_any().unbind()
+                    }
+                    Parents::Ghost => py.None(),
+                };
+                pyo3::types::PyTuple::new(py, [k.0, parents_obj])
+            })
+            .collect()
+    }
+
+    fn find_distance_to_null(
+        &self,
+        py: Python,
+        target_revision_id: Py<PyAny>,
+        known_revision_ids: Py<PyAny>,
+    ) -> PyResult<i64> {
+        let target = PyNode::from(target_revision_id);
+        let mut known: Vec<(PyNode, i64)> = Vec::new();
+        for item in known_revision_ids.bind(py).try_iter()? {
+            let (k, d): (Py<PyAny>, i64) = item?.extract()?;
+            known.push((PyNode::from(k), d));
+        }
+        let null_bytes = pyo3::types::PyBytes::new(py, NULL_REVISION);
+        let null = PyNode::from(null_bytes.into_any().unbind());
+        self.inner
+            .find_distance_to_null(target, known, null)
+            .map_err(graph_error_to_py)
+    }
+
+    fn find_lefthand_distances<'py>(
+        &self,
+        py: Python<'py>,
+        keys: Py<PyAny>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let nodes = extract_iter_pynodes(py, &keys)?;
+        let null_bytes = pyo3::types::PyBytes::new(py, NULL_REVISION);
+        let null = PyNode::from(null_bytes.into_any().unbind());
+        let result = self.inner.find_lefthand_distances(nodes, null);
+        let d = PyDict::new(py);
+        for (k, dist) in result {
+            d.set_item(k.0, dist)?;
+        }
+        Ok(d)
+    }
+
+    fn __repr__(&self, py: Python) -> PyResult<String> {
+        let r = self.provider_py.bind(py).repr()?;
+        Ok(format!("Graph({})", r))
+    }
+}
+
+import_exception!(vcsgraph.errors, GhostRevisionsHaveNoRevno);
+import_exception!(vcsgraph.errors, RevisionNotPresent);
+
+fn graph_error_to_py(e: GraphError<PyNode>) -> PyErr {
+    match e {
+        GraphError::GhostRevision { target, ghost } => Python::attach(|py| {
+            GhostRevisionsHaveNoRevno::new_err((target.0.clone_ref(py), ghost.0.clone_ref(py)))
+        }),
+        GraphError::RevisionNotPresent(key) => {
+            Python::attach(|py| RevisionNotPresent::new_err((key.0.clone_ref(py),)))
+        }
+        GraphError::Cycle(_) => GraphCycleError::new_err(("cycle in graph",)),
+    }
+}
+
 #[pymodule]
 fn _graph_rs(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(invert_parent_map))?;
@@ -764,5 +994,6 @@ fn _graph_rs(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_class::<PyKnownGraphMergeSortNode>()?;
     m.add_class::<PyKnownGraphNode>()?;
     m.add_class::<PyKnownGraphNodesView>()?;
+    m.add_class::<PyGraph>()?;
     Ok(())
 }

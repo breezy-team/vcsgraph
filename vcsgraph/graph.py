@@ -23,7 +23,7 @@ import logging
 import time
 
 from . import errors
-from ._graph_rs import collapse_linear_regions, invert_parent_map
+from ._graph_rs import _RustGraph, collapse_linear_regions, invert_parent_map
 
 # NULL_REVISION constant
 NULL_REVISION = b"null:"
@@ -261,6 +261,10 @@ class Graph:
         if getattr(parents_provider, "get_parent_map", None) is not None:
             self.get_parent_map = parents_provider.get_parent_map
         self._parents_provider = parents_provider
+        # Rust-backed helper for methods that have been ported. Uses the same
+        # parents provider; the Rust side calls back into Python via a GIL
+        # adapter when it needs a parent lookup.
+        self._rs = _RustGraph(parents_provider)
 
     def __repr__(self):
         return f"Graph({self._parents_provider!r})"
@@ -361,46 +365,7 @@ class Graph:
         :param known_revision_ids: [(revision_id, revno)] A list of known
             revno, revision_id tuples. We'll use this to seed the search.
         """
-        # Map from revision_ids to a known value for their revno
-        known_revnos = dict(known_revision_ids)
-        cur_tip = target_revision_id
-        num_steps = 0
-        # NULL_REVISION already defined at module level
-        known_revnos[NULL_REVISION] = 0
-
-        searching_known_tips = list(known_revnos)
-
-        unknown_searched = {}
-
-        while cur_tip not in known_revnos:
-            unknown_searched[cur_tip] = num_steps
-            num_steps += 1
-            to_search = {cur_tip}
-            to_search.update(searching_known_tips)
-            parent_map = self.get_parent_map(to_search)
-            parents = parent_map.get(cur_tip, None)
-            if not parents:  # An empty list or None is a ghost
-                raise errors.GhostRevisionsHaveNoRevno(target_revision_id, cur_tip)
-            cur_tip = parents[0]
-            next_known_tips = []
-            for revision_id in searching_known_tips:
-                parents = parent_map.get(revision_id, None)
-                if not parents:
-                    continue
-                next = parents[0]
-                next_revno = known_revnos[revision_id] - 1
-                if next in unknown_searched:
-                    # We have enough information to return a value right now
-                    return next_revno + unknown_searched[next]
-                if next in known_revnos:
-                    continue
-                known_revnos[next] = next_revno
-                next_known_tips.append(next)
-            searching_known_tips = next_known_tips
-
-        # We reached a known revision, so just add in how many steps it took to
-        # get there.
-        return known_revnos[cur_tip] + num_steps
+        return self._rs.find_distance_to_null(target_revision_id, known_revision_ids)
 
     def find_lefthand_distances(self, keys):
         """Find the distance to null for all the keys in keys.
@@ -408,20 +373,7 @@ class Graph:
         :param keys: keys to lookup.
         :return: A dict key->distance for all of keys.
         """
-        # Optimisable by concurrent searching, but a random spread should get
-        # some sort of hit rate.
-        known_revnos = []
-        ghosts = []
-        for key in keys:
-            try:
-                known_revnos.append(
-                    (key, self.find_distance_to_null(key, known_revnos))
-                )
-            except errors.GhostRevisionsHaveNoRevno:
-                ghosts.append(key)
-        for key in ghosts:
-            known_revnos.append((key, -1))
-        return dict(known_revnos)
+        return self._rs.find_lefthand_distances(keys)
 
     def find_unique_ancestors(self, unique_revision, common_revisions):
         """Find the unique ancestors for a revision versus others.
@@ -1051,19 +1003,7 @@ class Graph:
             defined by get_parent_map.)
             There will also be a node for (NULL_REVISION, ())
         """
-        pending = set(revision_ids)
-        processed = set()
-        while pending:
-            processed.update(pending)
-            next_map = self.get_parent_map(pending)
-            next_pending = set()
-            for item in next_map.items():
-                yield item
-                next_pending.update(p for p in item[1] if p not in processed)
-            ghosts = pending.difference(next_map)
-            for ghost in ghosts:
-                yield (ghost, None)
-            pending = next_pending
+        yield from self._rs.iter_ancestry(revision_ids)
 
     def iter_lefthand_ancestry(self, start_key, stop_keys=None):
         if stop_keys is None:
@@ -1093,11 +1033,7 @@ class Graph:
         An ancestor may sort after a descendant if the relationship is not
         visible in the supplied list of revisions.
         """
-        from . import tsort
-
-        pm = self.get_parent_map(revisions)
-        sorter = tsort.TopoSorter(pm)
-        return sorter.iter_topo_order()
+        return iter(self._rs.iter_topo_order(revisions))
 
     def is_ancestor(self, candidate_ancestor, candidate_descendant):
         """Determine whether a revision is an ancestor of another.
