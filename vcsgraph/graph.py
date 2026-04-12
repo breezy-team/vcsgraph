@@ -25,6 +25,7 @@ from ._graph_rs import (
 from ._graph_rs import (
     CachingParentsProvider,
     FrozenHeadsCache,
+    GraphThunkIdsToKeys,
     HeadsCache,
     _RustGraph,
     collapse_linear_regions,
@@ -428,31 +429,6 @@ class Graph:
         lower_bound_revid <= revid <= upper_bound_revid
         """
         return self._rs.is_between(revid, lower_bound_revid, upper_bound_revid)
-
-
-class GraphThunkIdsToKeys:
-    """Forwards calls about 'ids' to be about keys internally."""
-
-    def __init__(self, graph):
-        self._graph = graph
-
-    def topo_sort(self):
-        return [r for (r,) in self._graph.topo_sort()]
-
-    def heads(self, ids):
-        """See Graph.heads()."""
-        as_keys = [(i,) for i in ids]
-        head_keys = self._graph.heads(as_keys)
-        return {h[0] for h in head_keys}
-
-    def merge_sort(self, tip_revision):
-        nodes = self._graph.merge_sort((tip_revision,))
-        for node in nodes:
-            node.key = node.key[0]
-        return nodes
-
-    def add_node(self, revision, parents):
-        self._graph.add_node((revision,), [(p,) for p in parents])
 
 
 _counters = [0, 0, 0, 0, 0, 0, 0]

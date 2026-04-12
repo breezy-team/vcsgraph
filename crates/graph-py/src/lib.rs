@@ -772,6 +772,86 @@ fn sort_pynodes_by_hash(items: impl IntoIterator<Item = PyNode>) -> Vec<PyNode> 
     v
 }
 
+/// Adapter that wraps a graph whose keys are 1-tuples of ids. Each method
+/// takes ids, wraps them in tuples, delegates to the underlying graph,
+/// then unwraps the tuples in the response. Mirrors
+/// `vcsgraph.graph.GraphThunkIdsToKeys`.
+#[pyclass(name = "GraphThunkIdsToKeys")]
+struct PyGraphThunkIdsToKeys {
+    graph: Py<PyAny>,
+}
+
+#[pymethods]
+impl PyGraphThunkIdsToKeys {
+    #[new]
+    fn new(graph: Py<PyAny>) -> Self {
+        PyGraphThunkIdsToKeys { graph }
+    }
+
+    fn topo_sort(&self, py: Python) -> PyResult<Vec<Py<PyAny>>> {
+        let result = self.graph.bind(py).call_method0("topo_sort")?;
+        let mut out = Vec::new();
+        for item in result.try_iter()? {
+            let tup = item?;
+            out.push(tup.get_item(0)?.unbind());
+        }
+        Ok(out)
+    }
+
+    fn heads<'py>(
+        &self,
+        py: Python<'py>,
+        ids: Py<PyAny>,
+    ) -> PyResult<Bound<'py, pyo3::types::PySet>> {
+        let mut as_keys: Vec<Py<PyAny>> = Vec::new();
+        for item in ids.bind(py).try_iter()? {
+            let item = item?;
+            let tup = pyo3::types::PyTuple::new(py, [item.unbind()])?;
+            as_keys.push(tup.into_any().unbind());
+        }
+        let head_keys = self
+            .graph
+            .bind(py)
+            .call_method1("heads", (pyo3::types::PyList::new(py, as_keys)?,))?;
+        let mut out_items: Vec<Py<PyAny>> = Vec::new();
+        for h in head_keys.try_iter()? {
+            let h = h?;
+            out_items.push(h.get_item(0)?.unbind());
+        }
+        pyo3::types::PySet::new(py, out_items)
+    }
+
+    fn merge_sort(&self, py: Python, tip_revision: Py<PyAny>) -> PyResult<Py<PyAny>> {
+        let tip_tuple = pyo3::types::PyTuple::new(py, [tip_revision])?;
+        let nodes = self
+            .graph
+            .bind(py)
+            .call_method1("merge_sort", (tip_tuple,))?;
+        for item in nodes.try_iter()? {
+            let item = item?;
+            let key = item.getattr("key")?;
+            let unwrapped = key.get_item(0)?;
+            item.setattr("key", unwrapped)?;
+        }
+        Ok(nodes.unbind())
+    }
+
+    fn add_node(&self, py: Python, revision: Py<PyAny>, parents: Py<PyAny>) -> PyResult<()> {
+        let rev_tuple = pyo3::types::PyTuple::new(py, [revision])?;
+        let mut parent_tuples: Vec<Py<PyAny>> = Vec::new();
+        for p in parents.bind(py).try_iter()? {
+            let p = p?;
+            let tup = pyo3::types::PyTuple::new(py, [p.unbind()])?;
+            parent_tuples.push(tup.into_any().unbind());
+        }
+        self.graph.bind(py).call_method1(
+            "add_node",
+            (rev_tuple, pyo3::types::PyList::new(py, parent_tuples)?),
+        )?;
+        Ok(())
+    }
+}
+
 /// A cache of results for graph heads() calls.
 ///
 /// The cache key is the unordered set of input keys; the value is the
@@ -1771,5 +1851,6 @@ fn _graph_rs(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_class::<PyCachingParentsProvider>()?;
     m.add_class::<PyHeadsCache>()?;
     m.add_class::<PyFrozenHeadsCache>()?;
+    m.add_class::<PyGraphThunkIdsToKeys>()?;
     Ok(())
 }
