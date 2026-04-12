@@ -16,6 +16,7 @@ categories = ["algorithms", "data-structures"]
 [dependencies]
 lazy_static = "1.4.0"
 pyo3 = { workspace = true, optional = true }
+rustc-hash = "2"
 
 [dev-dependencies]
 maplit = "1.0.2"
