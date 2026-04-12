@@ -603,7 +603,11 @@ mod tests {
     }
 
     fn feature_branch() -> KnownGraph<&'static str> {
-        make(&[("rev1", &[NULL]), ("rev2b", &["rev1"]), ("rev3b", &["rev2b"])])
+        make(&[
+            ("rev1", &[NULL]),
+            ("rev2b", &["rev1"]),
+            ("rev3b", &["rev2b"]),
+        ])
     }
 
     fn extended_history_shortcut() -> KnownGraph<&'static str> {
@@ -839,14 +843,8 @@ mod tests {
     #[test]
     fn test_heads_two_heads_from_ancestry_1() {
         let mut g = ancestry_1();
-        assert_eq!(
-            g.heads(vec!["rev2a", "rev2b"]),
-            set(["rev2a", "rev2b"])
-        );
-        assert_eq!(
-            g.heads(vec!["rev3", "rev2b"]),
-            set(["rev3", "rev2b"])
-        );
+        assert_eq!(g.heads(vec!["rev2a", "rev2b"]), set(["rev2a", "rev2b"]));
+        assert_eq!(g.heads(vec!["rev3", "rev2b"]), set(["rev3", "rev2b"]));
     }
 
     #[test]
@@ -856,26 +854,14 @@ mod tests {
         assert_eq!(g.heads(vec!["rev2b", "rev1"]), set(["rev2b"]));
         assert_eq!(g.heads(vec!["rev3a", "rev1"]), set(["rev3a"]));
         assert_eq!(g.heads(vec!["rev3b", "rev1"]), set(["rev3b"]));
-        assert_eq!(
-            g.heads(vec!["rev2a", "rev2b"]),
-            set(["rev2a", "rev2b"])
-        );
+        assert_eq!(g.heads(vec!["rev2a", "rev2b"]), set(["rev2a", "rev2b"]));
         assert_eq!(g.heads(vec!["rev3a", "rev2a"]), set(["rev3a"]));
         assert_eq!(g.heads(vec!["rev3a", "rev2b"]), set(["rev3a"]));
-        assert_eq!(
-            g.heads(vec!["rev3a", "rev2a", "rev2b"]),
-            set(["rev3a"])
-        );
+        assert_eq!(g.heads(vec!["rev3a", "rev2a", "rev2b"]), set(["rev3a"]));
         assert_eq!(g.heads(vec!["rev3b", "rev2a"]), set(["rev3b"]));
         assert_eq!(g.heads(vec!["rev3b", "rev2b"]), set(["rev3b"]));
-        assert_eq!(
-            g.heads(vec!["rev3b", "rev2a", "rev2b"]),
-            set(["rev3b"])
-        );
-        assert_eq!(
-            g.heads(vec!["rev3a", "rev3b"]),
-            set(["rev3a", "rev3b"])
-        );
+        assert_eq!(g.heads(vec!["rev3b", "rev2a", "rev2b"]), set(["rev3b"]));
+        assert_eq!(g.heads(vec!["rev3a", "rev3b"]), set(["rev3a", "rev3b"]));
         assert_eq!(
             g.heads(vec!["rev3a", "rev3b", "rev2a", "rev2b"]),
             set(["rev3a", "rev3b"])
@@ -889,22 +875,13 @@ mod tests {
             g.heads(vec!["rev2a", "rev2b", "rev2c"]),
             set(["rev2a", "rev2b", "rev2c"])
         );
-        assert_eq!(
-            g.heads(vec!["rev3a", "rev3b"]),
-            set(["rev3a", "rev3b"])
-        );
+        assert_eq!(g.heads(vec!["rev3a", "rev3b"]), set(["rev3a", "rev3b"]));
         assert_eq!(
             g.heads(vec!["rev2a", "rev3a", "rev3b"]),
             set(["rev3a", "rev3b"])
         );
-        assert_eq!(
-            g.heads(vec!["rev2a", "rev3b"]),
-            set(["rev2a", "rev3b"])
-        );
-        assert_eq!(
-            g.heads(vec!["rev2c", "rev3a"]),
-            set(["rev2c", "rev3a"])
-        );
+        assert_eq!(g.heads(vec!["rev2a", "rev3b"]), set(["rev2a", "rev3b"]));
+        assert_eq!(g.heads(vec!["rev2c", "rev3a"]), set(["rev2c", "rev3a"]));
     }
 
     #[test]
@@ -945,8 +922,7 @@ mod tests {
         let g = KnownGraph::new(pm.clone(), true);
         let result = g.topo_sort().unwrap();
         assert_eq!(result.len(), pm.len());
-        let idx: FxHashMap<&str, usize> =
-            result.iter().enumerate().map(|(i, k)| (*k, i)).collect();
+        let idx: FxHashMap<&str, usize> = result.iter().enumerate().map(|(i, k)| (*k, i)).collect();
         for (node, parents) in &pm {
             for parent in parents {
                 if !pm.contains_key(parent) {
@@ -1053,12 +1029,11 @@ mod tests {
                 .map(|n| (n.key, n.merge_depth, n.revno.clone(), n.end_of_merge))
                 .collect::<Vec<_>>()
         );
-        for (i, ((got_key, got_depth, got_eom), (exp_key, exp_depth, exp_revno, exp_eom))) in
-            result
-                .iter()
-                .map(|n| (n.key, n.merge_depth, n.end_of_merge))
-                .zip(expected.iter())
-                .enumerate()
+        for (i, ((got_key, got_depth, got_eom), (exp_key, exp_depth, exp_revno, exp_eom))) in result
+            .iter()
+            .map(|n| (n.key, n.merge_depth, n.end_of_merge))
+            .zip(expected.iter())
+            .enumerate()
         {
             let got_revno: Vec<usize> = result[i].revno.clone().into_iter().collect();
             let exp_revno_v: Vec<usize> = exp_revno.to_vec();

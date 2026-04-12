@@ -512,10 +512,7 @@ mod tests {
             ("child", &[]),
         ]);
         let mut s = BfsState::new(["head"]);
-        assert_eq!(
-            s.next_with_ghosts(&p),
-            Some((as_set(["head"]), as_set([])))
-        );
+        assert_eq!(s.next_with_ghosts(&p), Some((as_set(["head"]), as_set([]))));
         assert_eq!(s.next_set(&p), Some(as_set(["present"])));
         assert_eq!(
             s.next_with_ghosts(&p),
@@ -540,11 +537,7 @@ mod tests {
     /// (fully explored) set.
     #[test]
     fn get_state_excludes_current_pending() {
-        let p = provider(&[
-            ("head", &["child"]),
-            ("child", &[NULL]),
-            (NULL, &[]),
-        ]);
+        let p = provider(&[("head", &["child"]), ("child", &[NULL]), (NULL, &[])]);
         let mut s = BfsState::new(["head"]);
         let (started, excludes, included) = s.get_state(&p);
         assert_eq!(started, as_set(["head"]));
@@ -613,7 +606,7 @@ mod tests {
         s.next_set(&p); // yields head
         s.next_set(&p); // yields middle
         s.next_set(&p); // yields child
-        // Now stop both middle and child retroactively.
+                        // Now stop both middle and child retroactively.
         s.stop_searching_any(["middle", "child"]);
         assert!(s.stopped_keys.contains(&"middle"));
         assert!(s.stopped_keys.contains(&"child"));
@@ -630,11 +623,7 @@ mod tests {
     /// but gets filed under stopped_keys so it is excluded from included().
     #[test]
     fn start_searching_a_ghost_excludes_it() {
-        let p = provider(&[
-            ("head", &["child"]),
-            ("child", &[NULL]),
-            (NULL, &[]),
-        ]);
+        let p = provider(&[("head", &["child"]), ("child", &[NULL]), (NULL, &[])]);
         let mut s = BfsState::new(["head"]);
         // Start-searching a ghost while in next_with_ghosts mode (the
         // default after construction). This returns (present, ghosts).
@@ -696,11 +685,7 @@ mod tests {
     /// find_seen_ancestors should filter out keys not in seen.
     #[test]
     fn find_seen_ancestors_skips_unseen() {
-        let p = provider(&[
-            ("head", &[NULL]),
-            (NULL, &[]),
-            ("unrelated", &[]),
-        ]);
+        let p = provider(&[("head", &[NULL]), (NULL, &[]), ("unrelated", &[])]);
         let mut s = BfsState::new(["head"]);
         s.next_set(&p); // yields head
         let anc = s.find_seen_ancestors(["unrelated"], &p);
@@ -714,17 +699,13 @@ mod tests {
     /// processed).
     #[test]
     fn stop_searching_any_returns_only_effective_stops() {
-        let p = provider(&[
-            ("head", &["a"]),
-            ("a", &["b"]),
-            ("b", &[]),
-        ]);
+        let p = provider(&[("head", &["a"]), ("a", &["b"]), ("b", &[])]);
         let mut s = BfsState::new(["head"]);
         s.next_set(&p); // yields head
         s.next_set(&p); // yields a
-        // `head` is already returned; stopping it should report it as
-        // stopped but a no longer in frontier means only keys that are in
-        // next_query at stop time get returned.
+                        // `head` is already returned; stopping it should report it as
+                        // stopped but a no longer in frontier means only keys that are in
+                        // next_query at stop time get returned.
         let stopped = s.stop_searching_any(["a"]);
         assert_eq!(stopped, as_set(["a"]));
         // After stopping a, the search is exhausted.
@@ -735,10 +716,7 @@ mod tests {
     /// key should not be re-queried.
     #[test]
     fn start_searching_already_seen_is_noop() {
-        let p = provider(&[
-            ("head", &["child"]),
-            ("child", &[]),
-        ]);
+        let p = provider(&[("head", &["child"]), ("child", &[])]);
         let mut s = BfsState::new(["head"]);
         s.next_set(&p); // yields head, frontier now contains "child"
         let pre_seen = s.seen.clone();

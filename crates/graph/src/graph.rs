@@ -1973,4 +1973,271 @@ mod tests {
         let g = ancestry_1();
         assert_eq!(g.find_merge_order("rev4", ["rev2b"]), vec!["rev2b"]);
     }
+
+    fn with_ghost() -> Graph<&'static str, DictParentsProvider<&'static str>> {
+        // NULL_REVISION itself is explicitly included as a root so it
+        // survives as a key in iter_ancestry's output.
+        make(&[
+            ("a", &["b"]),
+            ("c", &["b", "d"]),
+            ("b", &["e"]),
+            ("d", &["e", "g"]),
+            ("e", &["f"]),
+            ("f", &[NULL]),
+            (NULL, &[]),
+        ])
+    }
+
+    fn racing_shortcuts() -> Graph<&'static str, DictParentsProvider<&'static str>> {
+        make(&[
+            ("a", &[NULL]),
+            ("b", &["a"]),
+            ("c", &["b"]),
+            ("d", &["c"]),
+            ("e", &["d"]),
+            ("f", &["e"]),
+            ("g", &["f"]),
+            ("h", &["g"]),
+            ("i", &["h", "o"]),
+            ("j", &["i", "y"]),
+            ("k", &["d"]),
+            ("l", &["k"]),
+            ("m", &["l"]),
+            ("n", &["m"]),
+            ("o", &["n", "g"]),
+            ("p", &["f"]),
+            ("q", &["p", "m"]),
+            ("r", &["o"]),
+            ("s", &["r"]),
+            ("t", &["s"]),
+            ("u", &["t"]),
+            ("v", &["u"]),
+            ("w", &["v"]),
+            ("x", &["w"]),
+            ("y", &["x"]),
+            ("z", &["x", "q"]),
+        ])
+    }
+
+    /// Python's `alt_merge` fixture.
+    ///
+    /// ```text
+    ///  a
+    ///  |\
+    ///  b |
+    ///  | |
+    ///  c |
+    ///   \|
+    ///    d
+    /// ```
+    fn alt_merge() -> Graph<&'static str, DictParentsProvider<&'static str>> {
+        make(&[("a", &[]), ("b", &["a"]), ("c", &["b"]), ("d", &["a", "c"])])
+    }
+
+    #[test]
+    fn test_heads_alt_merge() {
+        let g = alt_merge();
+        assert_eq!(g.heads_with_null(["a", "c"], &NULL), set(["c"]));
+    }
+
+    #[test]
+    fn test_heads_with_ghost_fixture() {
+        let g = with_ghost();
+        assert_eq!(g.heads_with_null(["e", "g"], &NULL), set(["e", "g"]));
+        assert_eq!(g.heads_with_null(["a", "c"], &NULL), set(["a", "c"]));
+        assert_eq!(g.heads_with_null(["a", "g"], &NULL), set(["a", "g"]));
+        assert_eq!(g.heads_with_null(["f", "g"], &NULL), set(["f", "g"]));
+        assert_eq!(g.heads_with_null(["c", "g"], &NULL), set(["c"]));
+        assert_eq!(g.heads_with_null(["c", "b", "d", "g"], &NULL), set(["c"]));
+        assert_eq!(
+            g.heads_with_null(["a", "c", "e", "g"], &NULL),
+            set(["a", "c"])
+        );
+        assert_eq!(g.heads_with_null(["a", "c", "f"], &NULL), set(["a", "c"]));
+    }
+
+    #[test]
+    fn test_filter_candidate_lca() {
+        // Corner case from Python:
+        //   NULL
+        //   / \
+        //  a   e
+        //  |   |
+        //  b   d
+        //   \ /
+        //    c
+        // `a`'s descendant is `c`; `e`'s descendant is also `c`. So
+        // heads([a, c, e]) should be just {c}.
+        let g = make(&[
+            ("c", &["b", "d"]),
+            ("d", &["e"]),
+            ("b", &["a"]),
+            ("a", &[NULL]),
+            ("e", &[NULL]),
+        ]);
+        assert_eq!(g.heads_with_null(["a", "c", "e"], &NULL), set(["c"]));
+    }
+
+    #[test]
+    fn test_iter_topo_order_ancestry_1() {
+        let g = ancestry_1();
+        let order = g.iter_topo_order(["rev2a", "rev3", "rev1"]).unwrap();
+        let pos = |k: &&str| order.iter().position(|n| n == k).unwrap();
+        assert_eq!(
+            order.iter().cloned().collect::<FxHashSet<_>>(),
+            set(["rev1", "rev2a", "rev3"])
+        );
+        assert!(pos(&"rev2a") > pos(&"rev1"));
+        assert!(pos(&"rev2a") < pos(&"rev3"));
+    }
+
+    #[test]
+    fn test_iter_ancestry_boundary() {
+        let g = with_ghost();
+        // `a` is not in the ancestry of `c`; everything else is.
+        let anc = g.iter_ancestry(["c"]);
+        let keys: FxHashSet<&'static str> = anc.iter().map(|(k, _)| *k).collect();
+        assert!(!keys.contains(&"a"));
+        assert!(keys.contains(&"c"));
+        assert!(keys.contains(&"b"));
+        assert!(keys.contains(&"d"));
+        assert!(keys.contains(&"e"));
+        assert!(keys.contains(&"f"));
+    }
+
+    #[test]
+    fn test_iter_ancestry_with_ghost_reports_none() {
+        let g = with_ghost();
+        // `g` is a ghost (present as parent of `d` but not as key).
+        // iter_ancestry should yield it with Parents::Ghost.
+        let anc = g.iter_ancestry(["a", "c"]);
+        let mut ghost_seen = false;
+        for (k, parents) in &anc {
+            if *k == "g" {
+                ghost_seen = true;
+                assert!(matches!(parents, Parents::Ghost));
+            }
+        }
+        assert!(ghost_seen, "ghost `g` should appear in iter_ancestry");
+    }
+
+    #[test]
+    fn test_find_lefthand_merger_rev2b() {
+        // In ancestry_1, rev4 merged rev2b (rev4 has parents [rev3, rev2b]).
+        // Walking rev4's lefthand ancestry from rev2b: rev4 is the merger.
+        let g = ancestry_1();
+        assert_eq!(g.find_lefthand_merger("rev2b", "rev4"), Some("rev4"));
+    }
+
+    #[test]
+    fn test_find_lefthand_merger_rev2a() {
+        // rev2a is itself a lefthand ancestor of rev4 (via rev3), so it's
+        // its own "merger".
+        let g = ancestry_1();
+        assert_eq!(g.find_lefthand_merger("rev2a", "rev4"), Some("rev2a"));
+    }
+
+    #[test]
+    fn test_find_lefthand_merger_rev4_not_ancestor() {
+        // rev4 is a descendant of rev2a, not an ancestor.
+        let g = ancestry_1();
+        assert_eq!(g.find_lefthand_merger("rev4", "rev2a"), None);
+    }
+
+    #[test]
+    fn test_unique_lca_recursive_ancestry_1() {
+        // In ancestry_1, rev1 is the unique LCA of rev2a and rev2b.
+        let g = ancestry_1();
+        let (key, steps) = g.find_unique_lca("rev2a", "rev2b", &NULL).unwrap();
+        assert_eq!(key, "rev1");
+        assert_eq!(steps, 1);
+    }
+
+    #[test]
+    fn test_unique_lca_no_common_ancestor() {
+        // Two disjoint ancestries share only NULL_REVISION as a common
+        // ancestor. find_unique_lca returns NULL (never errors).
+        let g = ancestry_2();
+        let (key, _steps) = g.find_unique_lca("rev4a", "rev1b", &NULL).unwrap();
+        assert_eq!(key, NULL);
+    }
+
+    #[test]
+    fn test_unique_ancestors_racing_shortcuts() {
+        let g = racing_shortcuts();
+        assert_eq!(g.find_unique_ancestors("z", ["y"]), set(["p", "q", "z"]));
+        assert_eq!(
+            g.find_unique_ancestors("j", ["z"]),
+            set(["h", "i", "j", "y"])
+        );
+    }
+
+    #[test]
+    fn test_find_distance_to_null_ancestry_1() {
+        let g = ancestry_1();
+        assert_eq!(
+            g.find_distance_to_null(NULL, std::iter::empty(), NULL)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            g.find_distance_to_null("rev1", std::iter::empty(), NULL)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            g.find_distance_to_null("rev2a", std::iter::empty(), NULL)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            g.find_distance_to_null("rev2b", std::iter::empty(), NULL)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            g.find_distance_to_null("rev3", std::iter::empty(), NULL)
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            g.find_distance_to_null("rev4", std::iter::empty(), NULL)
+                .unwrap(),
+            4
+        );
+    }
+
+    #[test]
+    fn test_find_lefthand_distances_ghosts() {
+        let g = make(&[("nonghost", &[NULL]), ("toghost", &["ghost"])]);
+        let d = g.find_lefthand_distances(vec!["nonghost", "toghost"], NULL);
+        assert_eq!(d.get(&"nonghost"), Some(&1));
+        // Ghosts are reported as distance -1.
+        assert_eq!(d.get(&"toghost"), Some(&-1));
+    }
+
+    #[test]
+    fn test_find_lefthand_distances_smoke() {
+        let g = make(&[
+            ("rev1", &[NULL]),
+            ("rev2a", &["rev1"]),
+            ("rev2b", &["rev1"]),
+            ("rev2c", &["rev1"]),
+            ("rev3a", &["rev2a", "rev2b"]),
+            ("rev3b", &["rev2b", "rev2c"]),
+        ]);
+        let d = g.find_lefthand_distances(vec!["rev3b", "rev2a"], NULL);
+        assert_eq!(d.get(&"rev2a"), Some(&2));
+        assert_eq!(d.get(&"rev3b"), Some(&3));
+    }
+
+    #[test]
+    fn test_get_child_map_ancestry_1() {
+        let g = ancestry_1();
+        let cm = g.get_child_map(vec!["rev4", "rev3", "rev2a", "rev2b"]);
+        assert_eq!(cm.get(&"rev1"), Some(&vec!["rev2a", "rev2b"]));
+        assert_eq!(cm.get(&"rev2a"), Some(&vec!["rev3"]));
+        assert_eq!(cm.get(&"rev2b"), Some(&vec!["rev4"]));
+        assert_eq!(cm.get(&"rev3"), Some(&vec!["rev4"]));
+    }
 }
