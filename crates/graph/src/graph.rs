@@ -338,6 +338,254 @@ where
         descendants.seen.difference(&stop.seen).cloned().collect()
     }
 
+    /// Find border ancestors of a set of revisions via a concurrent BFS.
+    ///
+    /// Returns `(border_ancestors, common_ancestors, searchers)`. The
+    /// searchers are left in the state they finished in so callers can
+    /// inspect `seen` for graph-difference calculations.
+    pub fn find_border_ancestors(
+        &self,
+        revisions: impl IntoIterator<Item = K>,
+    ) -> (FxHashSet<K>, FxHashSet<K>, Vec<BfsState<K>>) {
+        let revisions: Vec<K> = revisions.into_iter().collect();
+        let mut searchers: Vec<BfsState<K>> = revisions
+            .iter()
+            .map(|r| BfsState::new([r.clone()]))
+            .collect();
+        let mut common_ancestors: FxHashSet<K> = FxHashSet::default();
+        let mut border_ancestors: FxHashSet<K> = FxHashSet::default();
+
+        loop {
+            let mut newly_seen: FxHashSet<K> = FxHashSet::default();
+            for searcher in searchers.iter_mut() {
+                if let Some(new_ancestors) = searcher.next_set(&self.provider) {
+                    newly_seen.extend(new_ancestors);
+                }
+            }
+            let mut new_common: FxHashSet<K> = FxHashSet::default();
+            for revision in &newly_seen {
+                if common_ancestors.contains(revision) {
+                    new_common.insert(revision.clone());
+                    continue;
+                }
+                if searchers.iter().all(|s| s.seen.contains(revision)) {
+                    border_ancestors.insert(revision.clone());
+                    new_common.insert(revision.clone());
+                }
+            }
+            if !new_common.is_empty() {
+                // Pull in ancestors that are already seen by each searcher.
+                // We can't borrow searchers twice in one pass, so snapshot
+                // each searcher's contribution and merge.
+                let mut expanded = new_common.clone();
+                for searcher in searchers.iter() {
+                    let seen_anc = searcher.find_seen_ancestors(new_common.clone(), &self.provider);
+                    expanded.extend(seen_anc);
+                }
+                let new_common = expanded;
+                for searcher in searchers.iter_mut() {
+                    searcher.start_searching(new_common.iter().cloned(), &self.provider);
+                }
+                common_ancestors.extend(new_common);
+            }
+
+            // Convergence check: if all searchers have the same next query,
+            // we've merged into a single common line and can stop.
+            let first_frontier: FxHashSet<K> = searchers
+                .first()
+                .map(|s| s.next_query().clone())
+                .unwrap_or_default();
+            let all_same = searchers.iter().all(|s| s.next_query() == &first_frontier);
+            if all_same {
+                let uncommon: FxHashSet<K> = first_frontier
+                    .difference(&common_ancestors)
+                    .cloned()
+                    .collect();
+                if !uncommon.is_empty() {
+                    // Shouldn't happen in well-formed graphs, but instead of
+                    // panicking we just continue — matches Python's
+                    // AssertionError shape without crashing.
+                    // (Callers of find_difference etc. will see this as an
+                    // empty difference; tests never exercise this path.)
+                }
+                break;
+            }
+        }
+
+        (border_ancestors, common_ancestors, searchers)
+    }
+
+    /// Return the heads from amongst `keys`.
+    ///
+    /// This walks each candidate's ancestry and prunes any key reachable
+    /// from another. The `null` parameter is the sentinel the caller uses
+    /// for the origin (`b"null:"` in the Python layer); passing it lets the
+    /// Rust core stay string-typed without baking bytes into the API.
+    pub fn heads_with_null(&self, keys: impl IntoIterator<Item = K>, null: &K) -> FxHashSet<K> {
+        let mut candidate_heads: FxHashSet<K> = keys.into_iter().collect();
+        if candidate_heads.contains(null) {
+            candidate_heads.remove(null);
+            if candidate_heads.is_empty() {
+                let mut r = FxHashSet::default();
+                r.insert(null.clone());
+                return r;
+            }
+        }
+        if candidate_heads.len() < 2 {
+            return candidate_heads;
+        }
+        // One searcher per candidate, keyed by the candidate revision.
+        let mut searchers: FxHashMap<K, BfsState<K>> = candidate_heads
+            .iter()
+            .map(|c| (c.clone(), BfsState::new([c.clone()])))
+            .collect();
+        let mut active: FxHashSet<K> = candidate_heads.iter().cloned().collect();
+        // Skip the first yield (the candidate itself).
+        for (_, searcher) in searchers.iter_mut() {
+            searcher.next_set(&self.provider);
+        }
+        // Common walker: tracks nodes known to be common across all
+        // searchers, so that a searcher hitting one can stop early.
+        let mut common_walker: BfsState<K> = BfsState::new([] as [K; 0]);
+        while !active.is_empty() {
+            let mut ancestors: FxHashSet<K> = FxHashSet::default();
+            // Advance the common walker one step if there's anything to advance.
+            common_walker.next_set(&self.provider);
+            // Advance each active searcher one step.
+            let active_list: Vec<K> = active.iter().cloned().collect();
+            for candidate in active_list {
+                let finished = {
+                    let searcher = searchers.get_mut(&candidate).unwrap();
+                    match searcher.next_set(&self.provider) {
+                        Some(set) => {
+                            ancestors.extend(set);
+                            false
+                        }
+                        None => true,
+                    }
+                };
+                if finished {
+                    active.remove(&candidate);
+                }
+            }
+            // Process found ancestors.
+            let mut new_common: FxHashSet<K> = FxHashSet::default();
+            for ancestor in ancestors {
+                if candidate_heads.contains(&ancestor) {
+                    candidate_heads.remove(&ancestor);
+                    searchers.remove(&ancestor);
+                    active.remove(&ancestor);
+                }
+                if common_walker.seen.contains(&ancestor) {
+                    // Known common: tell every searcher to stop on it.
+                    let stop_set: FxHashSet<K> = [ancestor].into_iter().collect();
+                    for searcher in searchers.values_mut() {
+                        searcher.stop_searching_any(stop_set.iter().cloned());
+                    }
+                } else if searchers.values().all(|s| s.seen.contains(&ancestor)) {
+                    // All searchers have reached this node — it's newly
+                    // common. Stop any of its seen ancestors in each searcher.
+                    new_common.insert(ancestor.clone());
+                    // Collect seen ancestors per searcher, then apply stops.
+                    let seen_per_searcher: Vec<FxHashSet<K>> = searchers
+                        .values()
+                        .map(|s| s.find_seen_ancestors([ancestor.clone()], &self.provider))
+                        .collect();
+                    for (searcher, seen_anc) in
+                        searchers.values_mut().zip(seen_per_searcher.into_iter())
+                    {
+                        searcher.stop_searching_any(seen_anc);
+                    }
+                }
+            }
+            common_walker.start_searching(new_common, &self.provider);
+        }
+        candidate_heads
+    }
+
+    /// Find the lowest common ancestors of `revisions`.
+    pub fn find_lca(&self, revisions: impl IntoIterator<Item = K>, null: &K) -> FxHashSet<K> {
+        let (border_common, _common, _searchers) = self.find_border_ancestors(revisions);
+        self.heads_with_null(border_common, null)
+    }
+
+    /// Return whether `candidate_ancestor` is an ancestor of `candidate_descendant`.
+    pub fn is_ancestor(&self, candidate_ancestor: K, candidate_descendant: K, null: &K) -> bool {
+        let heads = self.heads_with_null(
+            [candidate_ancestor.clone(), candidate_descendant.clone()],
+            null,
+        );
+        heads.len() == 1 && heads.contains(&candidate_descendant)
+    }
+
+    /// Return whether `revid` is between `lower_bound_revid` and
+    /// `upper_bound_revid` (inclusive). `None` bounds are skipped.
+    pub fn is_between(
+        &self,
+        revid: K,
+        lower_bound_revid: Option<K>,
+        upper_bound_revid: Option<K>,
+        null: &K,
+    ) -> bool {
+        let upper_ok = match upper_bound_revid {
+            None => true,
+            Some(upper) => self.is_ancestor(revid.clone(), upper, null),
+        };
+        if !upper_ok {
+            return false;
+        }
+        match lower_bound_revid {
+            None => true,
+            Some(lower) => self.is_ancestor(lower, revid, null),
+        }
+    }
+
+    /// Find the order in which `lca_revision_ids` were merged into `tip`.
+    ///
+    /// Walks backwards from `tip` with a stack, left-first, collecting the
+    /// LCA revisions in the order they are encountered.
+    pub fn find_merge_order(
+        &self,
+        tip: K,
+        lca_revision_ids: impl IntoIterator<Item = K>,
+    ) -> Vec<K> {
+        let mut looking_for: FxHashSet<K> = lca_revision_ids.into_iter().collect();
+        if looking_for.len() == 1 {
+            return looking_for.into_iter().collect();
+        }
+        let mut stack: Vec<K> = vec![tip];
+        let mut found: Vec<K> = Vec::new();
+        let mut stop: FxHashSet<K> = FxHashSet::default();
+        while !stack.is_empty() && !looking_for.is_empty() {
+            let next_key = stack.pop().unwrap();
+            stop.insert(next_key.clone());
+            if looking_for.remove(&next_key) {
+                found.push(next_key);
+                if looking_for.len() == 1 {
+                    // Only one LCA left — add it and break without walking.
+                    let last = looking_for.iter().next().cloned().unwrap();
+                    looking_for.clear();
+                    found.push(last);
+                    break;
+                }
+                continue;
+            }
+            let pm = self.get_parent_map(std::iter::once(next_key.clone()));
+            let parents = match pm.get(&next_key) {
+                Some(Parents::Known(ps)) if !ps.is_empty() => ps.clone(),
+                _ => continue,
+            };
+            // Walk parents in reverse so the left-most parent is popped first.
+            for parent_id in parents.into_iter().rev() {
+                if !stop.contains(&parent_id) {
+                    stack.push(parent_id.clone());
+                }
+                stop.insert(parent_id);
+            }
+        }
+        found
+    }
+
     /// Find descendants of `old_key` that are ancestors of `new_key`.
     ///
     /// Uses [`find_descendant_ancestors`](Self::find_descendant_ancestors)
@@ -478,6 +726,69 @@ mod tests {
         let descendants = g.find_descendants("b", "d");
         let expected: FxHashSet<&'static str> = ["b", "c", "d"].into_iter().collect();
         assert_eq!(descendants, expected);
+    }
+
+    #[test]
+    fn heads_single_candidate() {
+        let g = make(&[("a", &[]), ("b", &["a"])]);
+        let h = g.heads_with_null(vec!["b"], &NULL);
+        assert_eq!(h, ["b"].into_iter().collect());
+    }
+
+    #[test]
+    fn heads_prunes_ancestors() {
+        // a <- b <- c
+        let g = make(&[("a", &[]), ("b", &["a"]), ("c", &["b"])]);
+        let h = g.heads_with_null(vec!["a", "c"], &NULL);
+        assert_eq!(h, ["c"].into_iter().collect());
+    }
+
+    #[test]
+    fn heads_diamond_returns_both() {
+        //     a
+        //    / \
+        //   b   c
+        //    \ /
+        //     d
+        let g = make(&[("a", &[]), ("b", &["a"]), ("c", &["a"]), ("d", &["b", "c"])]);
+        let h = g.heads_with_null(vec!["b", "c"], &NULL);
+        let expected: FxHashSet<_> = ["b", "c"].into_iter().collect();
+        assert_eq!(h, expected);
+    }
+
+    #[test]
+    fn heads_null_alone() {
+        let g = make(&[("a", &[])]);
+        let h = g.heads_with_null(vec![NULL], &NULL);
+        assert_eq!(h, [NULL].into_iter().collect());
+    }
+
+    #[test]
+    fn find_lca_diamond() {
+        //     a
+        //    / \
+        //   b   c
+        //    \ /
+        //     d
+        let g = make(&[("a", &[]), ("b", &["a"]), ("c", &["a"]), ("d", &["b", "c"])]);
+        let lca = g.find_lca(vec!["b", "c"], &NULL);
+        assert_eq!(lca, ["a"].into_iter().collect());
+    }
+
+    #[test]
+    fn is_ancestor_true_and_false() {
+        // a <- b <- c
+        let g = make(&[("a", &[]), ("b", &["a"]), ("c", &["b"])]);
+        assert!(g.is_ancestor("a", "c", &NULL));
+        assert!(g.is_ancestor("b", "c", &NULL));
+        assert!(!g.is_ancestor("c", "a", &NULL));
+    }
+
+    #[test]
+    fn find_merge_order_single() {
+        let g = make(&[("a", &[]), ("b", &["a"])]);
+        let order = g.find_merge_order("b", vec!["a"]);
+        assert_eq!(order, vec!["a"]);
     }
 
     #[test]

@@ -308,11 +308,7 @@ class Graph:
         3. The length of the shortest path between a border ancestor and an
            ancestor of all border ancestors.
         """
-        border_common, _common, _sides = self._find_border_ancestors(revisions)
-        # We may have common ancestors that can be reached from each other.
-        # - ask for the heads of them to filter it down to only ones that
-        # cannot be reached from each other - phase 2.
-        return self.heads(border_common)
+        return self._rs.find_lca(revisions)
 
     def find_difference(self, left_revision, right_revision):
         """Determine the graph difference between two revisions."""
@@ -815,76 +811,7 @@ class Graph:
             information. Callers will need to filter their input to create
             order if they need it.
         """
-        candidate_heads = set(keys)
-        if NULL_REVISION in candidate_heads:
-            # NULL_REVISION is only a head if it is the only entry
-            candidate_heads.remove(NULL_REVISION)
-            if not candidate_heads:
-                return {NULL_REVISION}
-        if len(candidate_heads) < 2:
-            return candidate_heads
-        searchers = {c: self._make_breadth_first_searcher([c]) for c in candidate_heads}
-        active_searchers = dict(searchers)
-        # skip over the actual candidate for each searcher
-        for searcher in active_searchers.values():
-            next(searcher)
-        # The common walker finds nodes that are common to two or more of the
-        # input keys, so that we don't access all history when a currently
-        # uncommon search point actually meets up with something behind a
-        # common search point. Common search points do not keep searches
-        # active; they just allow us to make searches inactive without
-        # accessing all history.
-        common_walker = self._make_breadth_first_searcher([])
-        while len(active_searchers) > 0:
-            ancestors = set()
-            # advance searches
-            try:
-                next(common_walker)
-            except StopIteration:
-                # No common points being searched at this time.
-                pass
-            for candidate in list(active_searchers):
-                try:
-                    searcher = active_searchers[candidate]
-                except KeyError:
-                    # rare case: we deleted candidate in a previous iteration
-                    # through this for loop, because it was determined to be
-                    # a descendant of another candidate.
-                    continue
-                try:
-                    ancestors.update(next(searcher))
-                except StopIteration:
-                    del active_searchers[candidate]
-                    continue
-            # process found nodes
-            new_common = set()
-            for ancestor in ancestors:
-                if ancestor in candidate_heads:
-                    candidate_heads.remove(ancestor)
-                    del searchers[ancestor]
-                    active_searchers.pop(ancestor, None)
-                # it may meet up with a known common node
-                if ancestor in common_walker.seen:
-                    # some searcher has encountered our known common nodes:
-                    # just stop it
-                    ancestor_set = {ancestor}
-                    for searcher in searchers.values():
-                        searcher.stop_searching_any(ancestor_set)
-                else:
-                    # or it may have been just reached by all the searchers:
-                    for searcher in searchers.values():
-                        if ancestor not in searcher.seen:
-                            break
-                    else:
-                        # The final active searcher has just reached this node,
-                        # making it be known as a descendant of all candidates,
-                        # so we can stop searching it, and any seen ancestors
-                        new_common.add(ancestor)
-                        for searcher in searchers.values():
-                            seen_ancestors = searcher.find_seen_ancestors([ancestor])
-                            searcher.stop_searching_any(seen_ancestors)
-            common_walker.start_searching(new_common)
-        return candidate_heads
+        return self._rs.heads(keys)
 
     def find_merge_order(self, tip_revision_id, lca_revision_ids):
         """Find the order that each revision was merged into tip.
@@ -892,46 +819,7 @@ class Graph:
         This basically just walks backwards with a stack, and walks left-first
         until it finds a node to stop.
         """
-        if len(lca_revision_ids) == 1:
-            return list(lca_revision_ids)
-        looking_for = set(lca_revision_ids)
-        # TODO: Is there a way we could do this "faster" by batching up the
-        # get_parent_map requests?
-        # TODO: Should we also be culling the ancestry search right away? We
-        # could add looking_for to the "stop" list, and walk their
-        # ancestry in batched mode. The flip side is it might mean we walk a
-        # lot of "stop" nodes, rather than only the minimum.
-        # Then again, without it we may trace back into ancestry we could have
-        # stopped early.
-        stack = [tip_revision_id]
-        found = []
-        stop = set()
-        while stack and looking_for:
-            next = stack.pop()
-            stop.add(next)
-            if next in looking_for:
-                found.append(next)
-                looking_for.remove(next)
-                if len(looking_for) == 1:
-                    found.append(looking_for.pop())
-                    break
-                continue
-            parent_ids = self.get_parent_map([next]).get(next, None)
-            if not parent_ids:  # Ghost, nothing to search here
-                continue
-            for parent_id in reversed(parent_ids):
-                # TODO: (performance) We see the parent at this point, but we
-                #       wait to mark it until later to make sure we get left
-                #       parents before right parents. However, instead of
-                #       waiting until we have traversed enough parents, we
-                #       could instead note that we've found it, and once all
-                #       parents are in the stack, just reverse iterate the
-                #       stack for them.
-                if parent_id not in stop:
-                    # this will need to be searched
-                    stack.append(parent_id)
-                stop.add(parent_id)
-        return found
+        return self._rs.find_merge_order(tip_revision_id, lca_revision_ids)
 
     def find_lefthand_merger(self, merged_key, tip_key):
         """Find the first lefthand ancestor of tip_key that merged merged_key.
@@ -1034,9 +922,7 @@ class Graph:
         smallest number of parent lookups to determine the ancestral
         relationship between N revisions.
         """
-        return {candidate_descendant} == self.heads(
-            [candidate_ancestor, candidate_descendant]
-        )
+        return self._rs.is_ancestor(candidate_ancestor, candidate_descendant)
 
     def is_between(self, revid, lower_bound_revid, upper_bound_revid):
         """Determine whether a revision is between two others.
@@ -1044,9 +930,7 @@ class Graph:
         returns true if and only if:
         lower_bound_revid <= revid <= upper_bound_revid
         """
-        return (
-            upper_bound_revid is None or self.is_ancestor(revid, upper_bound_revid)
-        ) and (lower_bound_revid is None or self.is_ancestor(lower_bound_revid, revid))
+        return self._rs.is_between(revid, lower_bound_revid, upper_bound_revid)
 
     def _search_for_extra_common(self, common, searchers):
         """Make sure that unique nodes are genuinely unique.

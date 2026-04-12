@@ -962,6 +962,144 @@ impl PyGraph {
         Ok(d)
     }
 
+    /// Return the heads from amongst keys.
+    ///
+    /// This is done by searching the ancestries of each key.  Any key that is
+    /// reachable from another key is not returned; all the others are.
+    ///
+    /// This operation scales with the relative depth between any two keys. If
+    /// any two keys are completely disconnected all ancestry of both sides
+    /// will be retrieved.
+    ///
+    /// :param keys: An iterable of keys.
+    /// :return: A set of the heads. Note that as a set there is no ordering
+    ///     information. Callers will need to filter their input to create
+    ///     order if they need it.
+    fn heads<'py>(
+        &self,
+        py: Python<'py>,
+        keys: Py<PyAny>,
+    ) -> PyResult<Bound<'py, pyo3::types::PySet>> {
+        let nodes = extract_iter_pynodes(py, &keys)?;
+        let null_bytes = pyo3::types::PyBytes::new(py, NULL_REVISION);
+        let null = PyNode::from(null_bytes.into_any().unbind());
+        let result = self.inner.heads_with_null(nodes, &null);
+        pynodes_to_pyset(py, result)
+    }
+
+    /// Determine the lowest common ancestors of the provided revisions.
+    ///
+    /// A lowest common ancestor is a common ancestor none of whose
+    /// descendants are common ancestors.  In graphs, unlike trees, there may
+    /// be multiple lowest common ancestors.
+    ///
+    /// This algorithm has two phases.  Phase 1 identifies border ancestors,
+    /// and phase 2 filters border ancestors to determine lowest common
+    /// ancestors.
+    ///
+    /// In phase 1, border ancestors are identified, using a breadth-first
+    /// search starting at the bottom of the graph.  Searches are stopped
+    /// whenever a node or one of its descendants is determined to be common
+    ///
+    /// In phase 2, the border ancestors are filtered to find the least
+    /// common ancestors.  This is done by searching the ancestries of each
+    /// border ancestor.
+    ///
+    /// Phase 2 is perfomed on the principle that a border ancestor that is
+    /// not an ancestor of any other border ancestor is a least common
+    /// ancestor.
+    ///
+    /// Searches are stopped when they find a node that is determined to be a
+    /// common ancestor of all border ancestors, because this shows that it
+    /// cannot be a descendant of any border ancestor.
+    ///
+    /// The scaling of this operation should be proportional to:
+    ///
+    /// 1. The number of uncommon ancestors
+    /// 2. The number of border ancestors
+    /// 3. The length of the shortest path between a border ancestor and an
+    ///    ancestor of all border ancestors.
+    fn find_lca<'py>(
+        &self,
+        py: Python<'py>,
+        revisions: Py<PyAny>,
+    ) -> PyResult<Bound<'py, pyo3::types::PySet>> {
+        let nodes = extract_iter_pynodes(py, &revisions)?;
+        // Match Python's `_find_border_ancestors` precondition: None is
+        // not a valid revision id. Raise InvalidRevisionId before running
+        // the algorithm so callers see the same error they used to.
+        for n in &nodes {
+            if n.0.is_none(py) {
+                return Err(InvalidRevisionId::new_err((
+                    py.None(),
+                    self.provider_py.clone_ref(py),
+                )));
+            }
+        }
+        let null_bytes = pyo3::types::PyBytes::new(py, NULL_REVISION);
+        let null = PyNode::from(null_bytes.into_any().unbind());
+        let result = self.inner.find_lca(nodes, &null);
+        pynodes_to_pyset(py, result)
+    }
+
+    /// Determine whether a revision is an ancestor of another.
+    ///
+    /// We answer this using heads() as heads() has the logic to perform the
+    /// smallest number of parent lookups to determine the ancestral
+    /// relationship between N revisions.
+    fn is_ancestor(
+        &self,
+        py: Python,
+        candidate_ancestor: Py<PyAny>,
+        candidate_descendant: Py<PyAny>,
+    ) -> bool {
+        let null_bytes = pyo3::types::PyBytes::new(py, NULL_REVISION);
+        let null = PyNode::from(null_bytes.into_any().unbind());
+        self.inner.is_ancestor(
+            PyNode::from(candidate_ancestor),
+            PyNode::from(candidate_descendant),
+            &null,
+        )
+    }
+
+    /// Determine whether a revision is between two others.
+    ///
+    /// returns true if and only if:
+    /// lower_bound_revid <= revid <= upper_bound_revid
+    #[pyo3(signature = (revid, lower_bound_revid, upper_bound_revid))]
+    fn is_between(
+        &self,
+        py: Python,
+        revid: Py<PyAny>,
+        lower_bound_revid: Option<Py<PyAny>>,
+        upper_bound_revid: Option<Py<PyAny>>,
+    ) -> bool {
+        let null_bytes = pyo3::types::PyBytes::new(py, NULL_REVISION);
+        let null = PyNode::from(null_bytes.into_any().unbind());
+        self.inner.is_between(
+            PyNode::from(revid),
+            lower_bound_revid.map(PyNode::from),
+            upper_bound_revid.map(PyNode::from),
+            &null,
+        )
+    }
+
+    /// Find the order that each revision was merged into tip.
+    ///
+    /// This basically just walks backwards with a stack, and walks left-first
+    /// until it finds a node to stop.
+    fn find_merge_order(
+        &self,
+        py: Python,
+        tip_revision_id: Py<PyAny>,
+        lca_revision_ids: Py<PyAny>,
+    ) -> PyResult<Vec<Py<PyAny>>> {
+        let tip = PyNode::from(tip_revision_id);
+        let lcas = extract_iter_pynodes(py, &lca_revision_ids)?;
+        let result = self.inner.find_merge_order(tip, lcas);
+        Ok(result.into_iter().map(|n| n.0).collect())
+    }
+
     /// Find descendants of `old_key` that are ancestors of `new_key`.
     fn find_descendants<'py>(
         &self,
@@ -995,6 +1133,7 @@ impl PyGraph {
 }
 
 import_exception!(vcsgraph.errors, GhostRevisionsHaveNoRevno);
+import_exception!(vcsgraph.errors, InvalidRevisionId);
 import_exception!(vcsgraph.errors, RevisionNotPresent);
 
 fn graph_error_to_py(e: GraphError<PyNode>) -> PyErr {
