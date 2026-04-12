@@ -18,15 +18,17 @@
 
 __all__ = ["collapse_linear_regions", "invert_parent_map"]
 
-from . import errors
 from ._graph_rs import (
     _BreadthFirstSearcher as _RustBreadthFirstSearcher,
 )
 from ._graph_rs import (
     CachingParentsProvider,
+    CallableToParentsProviderAdapter,
+    DictParentsProvider,
     FrozenHeadsCache,
     GraphThunkIdsToKeys,
     HeadsCache,
+    StackedParentsProvider,
     _RustGraph,
     collapse_linear_regions,
     invert_parent_map,
@@ -56,97 +58,6 @@ NULL_REVISION = b"null:"
 # The find_unique_lca algorithm will pick A in two steps:
 # 1. find_lca('G', 'H') => ['D', 'E']
 # 2. Since len(['D', 'E']) > 1, find_lca('D', 'E') => ['A']
-
-
-class DictParentsProvider:
-    """A parents provider for Graph objects."""
-
-    def __init__(self, ancestry):
-        self.ancestry = ancestry
-
-    def __repr__(self):
-        return f"DictParentsProvider({self.ancestry!r})"
-
-    # Note: DictParentsProvider does not implement get_cached_parent_map
-    #       Arguably, the data is clearly cached in memory. However, this class
-    #       is mostly used for testing, and it keeps the tests clean to not
-    #       change it.
-
-    def get_parent_map(self, keys):
-        """See StackedParentsProvider.get_parent_map."""
-        ancestry = self.ancestry
-        return {k: tuple(ancestry[k]) for k in keys if k in ancestry}
-
-
-class StackedParentsProvider:
-    """A parents provider which stacks (or unions) multiple providers.
-
-    The providers are queries in the order of the provided parent_providers.
-    """
-
-    def __init__(self, parent_providers):
-        self._parent_providers = parent_providers
-
-    def __repr__(self):
-        return f"{self.__class__.__name__}({self._parent_providers!r})"
-
-    def get_parent_map(self, keys):
-        """Get a mapping of keys => parents.
-
-        A dictionary is returned with an entry for each key present in this
-        source. If this source doesn't have information about a key, it should
-        not include an entry.
-
-        [NULL_REVISION] is used as the parent of the first user-committed
-        revision.  Its parent list is empty.
-
-        :param keys: An iterable returning keys to check (eg revision_ids)
-        :return: A dictionary mapping each key to its parents
-        """
-        found = {}
-        remaining = set(keys)
-        # This adds getattr() overhead to each get_parent_map call. However,
-        # this is StackedParentsProvider, which means we're dealing with I/O
-        # (either local indexes, or remote RPCs), so CPU overhead should be
-        # minimal.
-        for parents_provider in self._parent_providers:
-            get_cached = getattr(parents_provider, "get_cached_parent_map", None)
-            if get_cached is None:
-                continue
-            new_found = get_cached(remaining)
-            found.update(new_found)
-            remaining.difference_update(new_found)
-            if not remaining:
-                break
-        if not remaining:
-            return found
-        for parents_provider in self._parent_providers:
-            try:
-                new_found = parents_provider.get_parent_map(remaining)
-            except errors.UnsupportedOperation:
-                continue
-            found.update(new_found)
-            remaining.difference_update(new_found)
-            if not remaining:
-                break
-        return found
-
-
-class CallableToParentsProviderAdapter:
-    """A parents provider that adapts any callable to the parents provider API.
-
-    i.e. it accepts calls to self.get_parent_map and relays them to the
-    callable it was constructed with.
-    """
-
-    def __init__(self, a_callable):
-        self.callable = a_callable
-
-    def __repr__(self):
-        return f"{self.__class__.__name__}({self.callable!r})"
-
-    def get_parent_map(self, keys):
-        return self.callable(keys)
 
 
 class Graph:

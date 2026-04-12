@@ -1878,11 +1878,11 @@ class TestStackedParentsProvider(TestCase):
         return SharedInstrumentedParentsProvider(pp, self.calls, info)
 
     def test_stacked_parents_provider(self):
-        parents1 = _mod_graph.DictParentsProvider({b"rev2": (b"rev3",)})
-        parents2 = _mod_graph.DictParentsProvider({b"rev1": (b"rev4",)})
+        parents1 = _mod_graph.DictParentsProvider({b"rev2": [b"rev3"]})
+        parents2 = _mod_graph.DictParentsProvider({b"rev1": [b"rev4"]})
         stacked = _mod_graph.StackedParentsProvider([parents1, parents2])
         self.assertEqual(
-            {b"rev1": (b"rev4",), b"rev2": (b"rev3",)},
+            {b"rev1": [b"rev4"], b"rev2": [b"rev3"]},
             stacked.get_parent_map(
                 (
                     b"rev1",
@@ -1891,14 +1891,14 @@ class TestStackedParentsProvider(TestCase):
             ),
         )
         self.assertEqual(
-            {b"rev2": (b"rev3",), b"rev1": (b"rev4",)},
+            {b"rev2": [b"rev3"], b"rev1": [b"rev4"]},
             stacked.get_parent_map((b"rev2", b"rev1")),
         )
         self.assertEqual(
-            {b"rev2": (b"rev3",)}, stacked.get_parent_map((b"rev2", b"rev2"))
+            {b"rev2": [b"rev3"]}, stacked.get_parent_map((b"rev2", b"rev2"))
         )
         self.assertEqual(
-            {b"rev1": (b"rev4",)}, stacked.get_parent_map((b"rev1", b"rev1"))
+            {b"rev1": [b"rev4"]}, stacked.get_parent_map((b"rev1", b"rev1"))
         )
 
     def test_stacked_parents_provider_overlapping(self):
@@ -1906,18 +1906,18 @@ class TestStackedParentsProvider(TestCase):
         # 1
         # |
         # 2
-        parents1 = _mod_graph.DictParentsProvider({b"rev2": (b"rev1",)})
-        parents2 = _mod_graph.DictParentsProvider({b"rev2": (b"rev1",)})
+        parents1 = _mod_graph.DictParentsProvider({b"rev2": [b"rev1"]})
+        parents2 = _mod_graph.DictParentsProvider({b"rev2": [b"rev1"]})
         stacked = _mod_graph.StackedParentsProvider([parents1, parents2])
-        self.assertEqual({b"rev2": (b"rev1",)}, stacked.get_parent_map([b"rev2"]))
+        self.assertEqual({b"rev2": [b"rev1"]}, stacked.get_parent_map([b"rev2"]))
 
     def test_handles_no_get_cached_parent_map(self):
         # this shows that we both handle when a provider doesn't implement
         # get_cached_parent_map
-        pp1 = self.get_shared_provider(b"pp1", {b"rev2": (b"rev1",)}, has_cached=False)
-        pp2 = self.get_shared_provider(b"pp2", {b"rev2": (b"rev1",)}, has_cached=True)
+        pp1 = self.get_shared_provider(b"pp1", {b"rev2": [b"rev1"]}, has_cached=False)
+        pp2 = self.get_shared_provider(b"pp2", {b"rev2": [b"rev1"]}, has_cached=True)
         stacked = _mod_graph.StackedParentsProvider([pp1, pp2])
-        self.assertEqual({b"rev2": (b"rev1",)}, stacked.get_parent_map([b"rev2"]))
+        self.assertEqual({b"rev2": [b"rev1"]}, stacked.get_parent_map([b"rev2"]))
         # No call on b'pp1' because it doesn't provide get_cached_parent_map
         self.assertEqual([(b"pp2", "cached", [b"rev2"])], self.calls)
 
@@ -1925,12 +1925,12 @@ class TestStackedParentsProvider(TestCase):
         # We should call get_cached_parent_map on all providers before we call
         # get_parent_map. Further, we should track what entries we have found,
         # and not re-try them.
-        pp1 = self.get_shared_provider(b"pp1", {b"a": ()}, has_cached=True)
-        pp2 = self.get_shared_provider(b"pp2", {b"c": (b"b",)}, has_cached=False)
-        pp3 = self.get_shared_provider(b"pp3", {b"b": (b"a",)}, has_cached=True)
+        pp1 = self.get_shared_provider(b"pp1", {b"a": []}, has_cached=True)
+        pp2 = self.get_shared_provider(b"pp2", {b"c": [b"b"]}, has_cached=False)
+        pp3 = self.get_shared_provider(b"pp3", {b"b": [b"a"]}, has_cached=True)
         stacked = _mod_graph.StackedParentsProvider([pp1, pp2, pp3])
         self.assertEqual(
-            {b"a": (), b"b": (b"a",), b"c": (b"b",)},
+            {b"a": [], b"b": [b"a"], b"c": [b"b"]},
             stacked.get_parent_map([b"a", b"b", b"c", b"d"]),
         )
         self.assertEqual(

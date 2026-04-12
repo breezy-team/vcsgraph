@@ -171,33 +171,189 @@ fn collapse_linear_regions(parent_map: ParentMap<PyNode>) -> PyResult<ParentMap<
     Ok(vcs_graph::collapse_linear_regions::<PyNode>(&parent_map))
 }
 
-#[pyclass]
-struct PyParentsProvider {
-    provider: Box<dyn vcs_graph::ParentsProvider<PyNode> + Send + Sync>,
+/// A parents provider for Graph objects, backed by a dict.
+///
+/// Mirrors `vcsgraph.graph.DictParentsProvider`: takes a mapping of
+/// `{key: parents_list}` and serves `get_parent_map` lookups from it.
+#[pyclass(name = "DictParentsProvider", dict)]
+struct PyDictParentsProvider {
+    inner: vcs_graph::DictParentsProvider<PyNode>,
+    ancestry: Py<PyAny>,
 }
 
 #[pymethods]
-impl PyParentsProvider {
-    fn get_parent_map(&mut self, py: Python, keys: Py<PyAny>) -> PyResult<ParentMap<PyNode>> {
-        let mut hash_key: HashSet<PyNode> = HashSet::new();
-        for key in keys.bind(py).try_iter()? {
-            hash_key.insert(key?.into());
+impl PyDictParentsProvider {
+    #[new]
+    fn new(py: Python, ancestry: Py<PyAny>) -> PyResult<Self> {
+        // Extract the mapping into a ParentMap. We accept any dict-like
+        // object by calling `.items()`.
+        let items = ancestry.bind(py).call_method0("items")?;
+        let mut pm = ParentMap::new();
+        for item in items.try_iter()? {
+            let item = item?;
+            let k: Py<PyAny> = item.get_item(0)?.unbind();
+            let v_obj = item.get_item(1)?;
+            let mut parents: Vec<PyNode> = Vec::new();
+            for p in v_obj.try_iter()? {
+                parents.push(PyNode::from(p?.unbind()));
+            }
+            pm.insert(PyNode::from(k), Parents::Known(parents));
         }
-        Ok(self
-            .provider
-            .get_parent_map(&hash_key.into_iter().collect()))
+        Ok(PyDictParentsProvider {
+            inner: vcs_graph::DictParentsProvider::<PyNode>::new(pm),
+            ancestry,
+        })
+    }
+
+    /// The underlying mapping, preserved as the original Python object.
+    #[getter]
+    fn ancestry(&self, py: Python) -> Py<PyAny> {
+        self.ancestry.clone_ref(py)
+    }
+
+    fn __repr__(&self, py: Python) -> PyResult<String> {
+        let r = self.ancestry.bind(py).repr()?;
+        Ok(format!("DictParentsProvider({})", r))
+    }
+
+    fn get_parent_map<'py>(
+        &self,
+        py: Python<'py>,
+        keys: Py<PyAny>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let nodes = extract_iter_pynodes(py, &keys)?;
+        let hs: HashSet<PyNode> = nodes.into_iter().collect();
+        let pm = self.inner.get_parent_map(&hs);
+        parent_map_to_pydict(py, pm)
     }
 }
 
-#[pyfunction]
-fn DictParentsProvider(
-    py: Python<'_>,
-    parent_map: ParentMap<PyNode>,
-) -> PyResult<Bound<'_, PyParentsProvider>> {
-    let provider = PyParentsProvider {
-        provider: Box::new(vcs_graph::DictParentsProvider::<PyNode>::new(parent_map)),
-    };
-    Bound::new(py, provider)
+impl ParentsProvider<PyNode> for PyDictParentsProvider {
+    fn get_parent_map(&self, keys: &HashSet<PyNode>) -> ParentMap<PyNode> {
+        self.inner.get_parent_map(keys)
+    }
+}
+
+/// A parents provider which stacks multiple child providers. Each child is
+/// queried in order, matching `vcsgraph.graph.StackedParentsProvider`.
+///
+/// If a child exposes `get_cached_parent_map`, that fast path is queried
+/// first for all children before any full `get_parent_map` call — just
+/// like the Python version.
+#[pyclass(name = "StackedParentsProvider")]
+struct PyStackedParentsProvider {
+    parent_providers: Vec<Py<PyAny>>,
+}
+
+#[pymethods]
+impl PyStackedParentsProvider {
+    #[new]
+    fn new(py: Python, parent_providers: Py<PyAny>) -> PyResult<Self> {
+        let mut providers = Vec::new();
+        for p in parent_providers.bind(py).try_iter()? {
+            providers.push(p?.unbind());
+        }
+        Ok(PyStackedParentsProvider {
+            parent_providers: providers,
+        })
+    }
+
+    fn __repr__(&self, py: Python) -> PyResult<String> {
+        let list =
+            pyo3::types::PyList::new(py, self.parent_providers.iter().map(|p| p.clone_ref(py)))?;
+        let r = list.repr()?;
+        Ok(format!("StackedParentsProvider({})", r))
+    }
+
+    fn get_parent_map<'py>(
+        &self,
+        py: Python<'py>,
+        keys: Py<PyAny>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let found = PyDict::new(py);
+        let remaining = pyo3::types::PySet::empty(py)?;
+        for k in keys.bind(py).try_iter()? {
+            remaining.add(k?.unbind())?;
+        }
+
+        // First pass: any provider that implements get_cached_parent_map
+        // gets queried cheaply before we hit the slow path.
+        for pp in &self.parent_providers {
+            if remaining.is_empty() {
+                break;
+            }
+            let bound = pp.bind(py);
+            let get_cached = bound.getattr("get_cached_parent_map");
+            let Ok(get_cached) = get_cached else {
+                continue;
+            };
+            if get_cached.is_none() {
+                continue;
+            }
+            let new_found = get_cached.call1((remaining.clone(),))?;
+            let new_found_dict = new_found.cast::<PyDict>()?;
+            for (k, v) in new_found_dict.iter() {
+                found.set_item(&k, v)?;
+                remaining.discard(&k)?;
+            }
+        }
+        if remaining.is_empty() {
+            return Ok(found);
+        }
+
+        // Second pass: full get_parent_map calls, in order.
+        for pp in &self.parent_providers {
+            if remaining.is_empty() {
+                break;
+            }
+            let bound = pp.bind(py);
+            let new_found = match bound.call_method1("get_parent_map", (remaining.clone(),)) {
+                Ok(r) => r,
+                Err(err) => {
+                    // Match Python's behaviour of catching UnsupportedOperation
+                    // and moving on.
+                    if err.get_type(py).is(&py
+                        .import("vcsgraph.errors")?
+                        .getattr("UnsupportedOperation")?)
+                    {
+                        continue;
+                    }
+                    return Err(err);
+                }
+            };
+            let new_found_dict = new_found.cast::<PyDict>()?;
+            for (k, v) in new_found_dict.iter() {
+                found.set_item(&k, v)?;
+                remaining.discard(&k)?;
+            }
+        }
+        Ok(found)
+    }
+}
+
+/// A parents provider that wraps any `get_parent_map`-like callable.
+///
+/// Mirrors `vcsgraph.graph.CallableToParentsProviderAdapter`.
+#[pyclass(name = "CallableToParentsProviderAdapter")]
+struct PyCallableToParentsProviderAdapter {
+    callable: Py<PyAny>,
+}
+
+#[pymethods]
+impl PyCallableToParentsProviderAdapter {
+    #[new]
+    fn new(callable: Py<PyAny>) -> Self {
+        PyCallableToParentsProviderAdapter { callable }
+    }
+
+    fn __repr__(&self, py: Python) -> PyResult<String> {
+        let r = self.callable.bind(py).repr()?;
+        Ok(format!("CallableToParentsProviderAdapter({})", r))
+    }
+
+    fn get_parent_map(&self, py: Python, keys: Py<PyAny>) -> PyResult<Py<PyAny>> {
+        Ok(self.callable.bind(py).call1((keys,))?.unbind())
+    }
 }
 
 #[pyclass]
@@ -1945,7 +2101,6 @@ impl PyBFSearcher {
 fn _graph_rs(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(invert_parent_map))?;
     m.add_wrapped(wrap_pyfunction!(collapse_linear_regions))?;
-    m.add_wrapped(wrap_pyfunction!(DictParentsProvider))?;
     m.add_wrapped(wrap_pyfunction!(merge_sort))?;
     m.add_class::<TopoSorter>()?;
     m.add_class::<MergeSorter>()?;
@@ -1960,5 +2115,8 @@ fn _graph_rs(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_class::<PyFrozenHeadsCache>()?;
     m.add_class::<PyGraphThunkIdsToKeys>()?;
     m.add_class::<PyLefthandAncestryIterator>()?;
+    m.add_class::<PyDictParentsProvider>()?;
+    m.add_class::<PyStackedParentsProvider>()?;
+    m.add_class::<PyCallableToParentsProviderAdapter>()?;
     Ok(())
 }
