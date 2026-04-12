@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "vcsgraph"
 description = "Graph algorithms for version control systems"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dynamic = ["version"]
 
 [project.optional-dependencies]
