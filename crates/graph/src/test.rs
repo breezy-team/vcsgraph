@@ -61,7 +61,7 @@ fn test_tsort_1() {
 
 #[test]
 fn test_tsort_partial() {
-    let graph = vec![
+    let graph = [
         (0, vec![]),
         (1, vec![0]),
         (2, vec![0]),

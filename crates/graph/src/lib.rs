@@ -289,11 +289,6 @@ impl<K: Clone + Hash + PartialEq + Eq> ChildMap<K> {
     }
 
     #[inline]
-    pub fn into_iter(self) -> impl Iterator<Item = (K, Vec<K>)> {
-        self.0.into_iter()
-    }
-
-    #[inline]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -309,6 +304,15 @@ impl<K: Hash + Clone + Eq> std::ops::Index<&K> for ChildMap<K> {
 
     fn index(&self, index: &K) -> &Self::Output {
         &self.0[index]
+    }
+}
+
+impl<K: Hash + Clone + Eq> IntoIterator for ChildMap<K> {
+    type Item = (K, Vec<K>);
+    type IntoIter = std::collections::hash_map::IntoIter<K, Vec<K>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
     }
 }
 
