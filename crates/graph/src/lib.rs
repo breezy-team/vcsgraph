@@ -23,7 +23,8 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
-//mod known_graph;
+pub mod known_graph;
+pub use known_graph::{Key, KnownGraph, MergeSortNode};
 mod parents_provider;
 pub use parents_provider::{DictParentsProvider, ParentsProvider, StackedParentsProvider};
 
