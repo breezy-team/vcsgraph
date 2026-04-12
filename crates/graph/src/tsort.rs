@@ -266,9 +266,15 @@ pub struct MergeSorter<K> {
     // it contains tuples - name, merge_depth
     left_subtree_pushed_stack: Vec<bool>,
     generate_revno: bool,
+    // The full parent map. Read-only after construction. This used to be
+    // stored twice (once mutable for destructive iteration via `remove`, once
+    // immutable for end-of-merge lookups); it is now stored once and the
+    // "still pending" bookkeeping lives in `not_yet_scheduled`.
     graph: HashMap<K, Vec<K>>,
+    // Nodes in `graph` that have not yet been pushed onto the pending stack.
+    // Plays the role of the old mutable `graph`'s key set.
+    not_yet_scheduled: FxHashSet<K>,
     stop_revision: Option<K>,
-    original_graph: HashMap<K, Vec<K>>,
     revnos: FxHashMap<K, (Option<RevnoVec>, bool)>,
     // Each mainline revision counts how many child branches have spawned from it.
     revno_to_branch_count: FxHashMap<usize, usize>,
@@ -338,11 +344,6 @@ impl<K: Eq + Hash + Clone + std::fmt::Debug> MergeSorter<K> {
             stop_revision = None;
         }
 
-        // we need to do a check late in the process to detect end-of-merges
-        // which requires the parents to be accessible: its easier for now
-        // to just keep the original graph around.
-        let original_graph = graph.clone();
-
         // we need to know the revision numbers of revisions to determine
         // the revision numbers of their descendants
         // this is a graph from node to [revno_tuple, first_child]
@@ -354,12 +355,13 @@ impl<K: Eq + Hash + Clone + std::fmt::Debug> MergeSorter<K> {
             .keys()
             .map(|revision| (revision.clone(), (None, true)))
             .collect::<FxHashMap<K, (Option<RevnoVec>, bool)>>();
+        let not_yet_scheduled: FxHashSet<K> = graph.keys().cloned().collect();
 
         let mut sorter = MergeSorter {
             generate_revno,
             graph,
+            not_yet_scheduled,
             stop_revision,
-            original_graph,
             revnos,
             revno_to_branch_count: FxHashMap::default(),
             node_name_stack: Vec::new(),
@@ -373,10 +375,20 @@ impl<K: Eq + Hash + Clone + std::fmt::Debug> MergeSorter<K> {
         };
 
         if let Some(branch_tip) = branch_tip {
-            let parents = sorter.graph.remove(&branch_tip);
-            sorter.push_node(branch_tip, 0, parents.unwrap());
+            let parents = sorter.take_parents(&branch_tip).unwrap();
+            sorter.push_node(branch_tip, 0, parents);
         }
         sorter
+    }
+
+    /// Mark `key` as scheduled and return a clone of its parent list, or
+    /// `None` if it was already scheduled or not in the graph.
+    fn take_parents(&mut self, key: &K) -> Option<Vec<K>> {
+        if self.not_yet_scheduled.remove(key) {
+            Some(self.graph[key].clone())
+        } else {
+            None
+        }
     }
 
     /// Sort the graph and return as a list.
@@ -433,7 +445,7 @@ impl<K: Eq + Hash + Clone + std::fmt::Debug> MergeSorter<K> {
         self.left_subtree_pushed_stack.pop().unwrap();
         self.pending_parents_stack.pop().unwrap();
 
-        let parents = self.original_graph.get(&node_name).unwrap();
+        let parents = self.graph.get(&node_name).unwrap();
         // Left-hand parent's revno, if it exists and isn't a ghost.
         let parent_revno = parents
             .first()
@@ -518,15 +530,15 @@ impl<K: Eq + Hash + Clone + std::fmt::Debug> MergeSorter<K> {
 
                     // otherwise transfer it from the source graph into the
                     // top of the current depth first search stack.
-                    let parents = match self.graph.remove(&next_node_name) {
+                    let parents = match self.take_parents(&next_node_name) {
                         Some(parents) => parents,
                         None => {
-                            // if the next node is not in the source graph it has
-                            // already been popped from it and placed into the
-                            // current search stack (but not completed or we would
-                            // have hit the continue 4 lines up.
-                            // this indicates a cycle.
-                            if self.original_graph.contains_key(&next_node_name) {
+                            // if the next node is not marked as pending it has
+                            // already been popped from the source graph and
+                            // placed into the current search stack (but not
+                            // completed or we would have hit the continue 4
+                            // lines up). this indicates a cycle.
+                            if self.graph.contains_key(&next_node_name) {
                                 return Err(Error::Cycle(self.node_name_stack.clone()));
                             } else {
                                 // This is just a ghost parent, ignore it
@@ -565,11 +577,9 @@ impl<K: Eq + Hash + std::fmt::Debug + Clone> Iterator for MergeSorter<K> {
             // the next node is to our left
             Some((_, next_depth, _)) if *next_depth < merge_depth => true,
             // the next node was part of a multiple-merge
-            Some((next_name, next_depth, _)) if *next_depth == merge_depth => !self
-                .original_graph
-                .get(&node_name)
-                .unwrap()
-                .contains(next_name),
+            Some((next_name, next_depth, _)) if *next_depth == merge_depth => {
+                !self.graph.get(&node_name).unwrap().contains(next_name)
+            }
             _ => false,
         };
         let revno_out = self.generate_revno.then_some(revno);
