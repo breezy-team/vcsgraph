@@ -588,4 +588,580 @@ mod tests {
         let keys: Vec<_> = ms.iter().map(|n| n.key).collect();
         assert_eq!(keys, vec!["c", "b", "a"]);
     }
+
+    /// Shared fixtures mirrored from `vcsgraph/tests/test_graph.py`.
+    const NULL: &str = "null:";
+
+    fn ancestry_1() -> KnownGraph<&'static str> {
+        make(&[
+            ("rev1", &[NULL]),
+            ("rev2a", &["rev1"]),
+            ("rev2b", &["rev1"]),
+            ("rev3", &["rev2a"]),
+            ("rev4", &["rev3", "rev2b"]),
+        ])
+    }
+
+    fn feature_branch() -> KnownGraph<&'static str> {
+        make(&[("rev1", &[NULL]), ("rev2b", &["rev1"]), ("rev3b", &["rev2b"])])
+    }
+
+    fn extended_history_shortcut() -> KnownGraph<&'static str> {
+        make(&[
+            ("a", &[NULL]),
+            ("b", &["a"]),
+            ("c", &["b"]),
+            ("d", &["c"]),
+            ("e", &["d"]),
+            ("f", &["a", "d"]),
+        ])
+    }
+
+    fn with_ghost() -> KnownGraph<&'static str> {
+        // A graph with a ghost at `g`.
+        make(&[
+            ("a", &["b"]),
+            ("c", &["b", "d"]),
+            ("b", &["e"]),
+            ("d", &["e", "g"]),
+            ("e", &["f"]),
+            ("f", &[NULL]),
+            (NULL, &[]),
+        ])
+    }
+
+    fn criss_cross() -> KnownGraph<&'static str> {
+        make(&[
+            ("rev1", &[NULL]),
+            ("rev2a", &["rev1"]),
+            ("rev2b", &["rev1"]),
+            ("rev3a", &["rev2a", "rev2b"]),
+            ("rev3b", &["rev2b", "rev2a"]),
+        ])
+    }
+
+    fn history_shortcut() -> KnownGraph<&'static str> {
+        make(&[
+            ("rev1", &[NULL]),
+            ("rev2a", &["rev1"]),
+            ("rev2b", &["rev1"]),
+            ("rev2c", &["rev1"]),
+            ("rev3a", &["rev2a", "rev2b"]),
+            ("rev3b", &["rev2b", "rev2c"]),
+        ])
+    }
+
+    /// Equivalent of Python's `alt_merge` fixture.
+    fn alt_merge() -> KnownGraph<&'static str> {
+        make(&[("a", &[]), ("b", &["a"]), ("c", &["b"]), ("d", &["a", "c"])])
+    }
+
+    fn set<const N: usize>(xs: [&'static str; N]) -> FxHashSet<&'static str> {
+        xs.into_iter().collect()
+    }
+
+    #[test]
+    fn test_children_ancestry1() {
+        let g = ancestry_1();
+        assert_eq!(g.get_child_keys(&NULL), Some(&["rev1"][..]));
+        let mut rev1_children: Vec<_> = g.get_child_keys(&"rev1").unwrap().to_vec();
+        rev1_children.sort();
+        assert_eq!(rev1_children, vec!["rev2a", "rev2b"]);
+        assert_eq!(g.get_child_keys(&"rev2a"), Some(&["rev3"][..]));
+        assert_eq!(g.get_child_keys(&"rev3"), Some(&["rev4"][..]));
+        assert_eq!(g.get_child_keys(&"rev2b"), Some(&["rev4"][..]));
+        assert_eq!(g.get_child_keys(&"not_in_graph"), None);
+    }
+
+    #[test]
+    fn test_parent_ancestry1() {
+        let g = ancestry_1();
+        assert_eq!(g.get_parent_keys(&"rev1"), Some(&[NULL][..]));
+        assert_eq!(g.get_parent_keys(&"rev2a"), Some(&["rev1"][..]));
+        assert_eq!(g.get_parent_keys(&"rev2b"), Some(&["rev1"][..]));
+        assert_eq!(g.get_parent_keys(&"rev3"), Some(&["rev2a"][..]));
+        let mut rev4_parents: Vec<_> = g.get_parent_keys(&"rev4").unwrap().to_vec();
+        rev4_parents.sort();
+        assert_eq!(rev4_parents, vec!["rev2b", "rev3"]);
+    }
+
+    #[test]
+    fn test_parent_with_ghost() {
+        // In `with_ghost`, "g" is a ghost: present as a parent of `d` but
+        // has no parent_keys of its own.
+        let g = with_ghost();
+        assert_eq!(g.get_parent_keys(&"g"), None);
+    }
+
+    #[test]
+    fn test_gdfo_ancestry_1() {
+        let g = ancestry_1();
+        assert_eq!(g.gdfo(&"rev1"), Some(2));
+        assert_eq!(g.gdfo(&"rev2a"), Some(3));
+        assert_eq!(g.gdfo(&"rev2b"), Some(3));
+        assert_eq!(g.gdfo(&"rev3"), Some(4));
+        assert_eq!(g.gdfo(&"rev4"), Some(5));
+    }
+
+    #[test]
+    fn test_gdfo_feature_branch() {
+        let g = feature_branch();
+        assert_eq!(g.gdfo(&"rev1"), Some(2));
+        assert_eq!(g.gdfo(&"rev2b"), Some(3));
+        assert_eq!(g.gdfo(&"rev3b"), Some(4));
+    }
+
+    #[test]
+    fn test_gdfo_extended_history_shortcut() {
+        let g = extended_history_shortcut();
+        assert_eq!(g.gdfo(&"a"), Some(2));
+        assert_eq!(g.gdfo(&"b"), Some(3));
+        assert_eq!(g.gdfo(&"c"), Some(4));
+        assert_eq!(g.gdfo(&"d"), Some(5));
+        assert_eq!(g.gdfo(&"e"), Some(6));
+        assert_eq!(g.gdfo(&"f"), Some(6));
+    }
+
+    #[test]
+    fn test_gdfo_with_ghost() {
+        let g = with_ghost();
+        assert_eq!(g.gdfo(&"f"), Some(2));
+        assert_eq!(g.gdfo(&"e"), Some(3));
+        assert_eq!(g.gdfo(&"g"), Some(1));
+        assert_eq!(g.gdfo(&"b"), Some(4));
+        assert_eq!(g.gdfo(&"d"), Some(4));
+        assert_eq!(g.gdfo(&"a"), Some(5));
+        assert_eq!(g.gdfo(&"c"), Some(5));
+    }
+
+    #[test]
+    fn test_add_existing_node_noop() {
+        let mut g = ancestry_1();
+        assert_eq!(g.gdfo(&"rev4"), Some(5));
+        g.add_node("rev4", vec!["rev3", "rev2b"]).unwrap();
+        assert_eq!(g.gdfo(&"rev4"), Some(5));
+    }
+
+    #[test]
+    fn test_add_existing_node_mismatched_parents() {
+        let mut g = ancestry_1();
+        let r = g.add_node("rev4", vec!["rev2b", "rev3"]);
+        assert!(matches!(r, Err(Error::ParentMismatch { .. })));
+    }
+
+    #[test]
+    fn test_add_node_with_ghost_parent() {
+        let mut g = ancestry_1();
+        g.add_node("rev5", vec!["rev2b", "revGhost"]).unwrap();
+        assert_eq!(g.gdfo(&"rev5"), Some(4));
+        assert_eq!(g.gdfo(&"revGhost"), Some(1));
+    }
+
+    #[test]
+    fn test_add_new_root() {
+        let mut g = ancestry_1();
+        g.add_node("rev5", vec![]).unwrap();
+        assert_eq!(g.gdfo(&"rev5"), Some(1));
+    }
+
+    #[test]
+    fn test_add_with_all_ghost_parents() {
+        let mut g = ancestry_1();
+        g.add_node("rev5", vec!["ghost"]).unwrap();
+        assert_eq!(g.gdfo(&"rev5"), Some(2));
+        assert_eq!(g.gdfo(&"ghost"), Some(1));
+    }
+
+    #[test]
+    fn test_gdfo_after_add_node() {
+        let mut g = ancestry_1();
+        assert_eq!(g.get_child_keys(&"rev4"), Some(&[][..]));
+        g.add_node("rev5", vec!["rev4"]).unwrap();
+        assert_eq!(g.get_parent_keys(&"rev5"), Some(&["rev4"][..]));
+        assert_eq!(g.get_child_keys(&"rev4"), Some(&["rev5"][..]));
+        assert_eq!(g.get_child_keys(&"rev5"), Some(&[][..]));
+        assert_eq!(g.gdfo(&"rev5"), Some(6));
+        g.add_node("rev6", vec!["rev2b"]).unwrap();
+        g.add_node("rev7", vec!["rev6"]).unwrap();
+        g.add_node("rev8", vec!["rev7", "rev5"]).unwrap();
+        assert_eq!(g.gdfo(&"rev5"), Some(6));
+        assert_eq!(g.gdfo(&"rev6"), Some(4));
+        assert_eq!(g.gdfo(&"rev7"), Some(5));
+        assert_eq!(g.gdfo(&"rev8"), Some(7));
+    }
+
+    #[test]
+    fn test_fill_in_ghost() {
+        // Add a few new roots, then fill in the ghost `g` so the
+        // children's gdfos get renumbered.
+        let mut g = with_ghost();
+        g.add_node("x", vec![]).unwrap();
+        g.add_node("y", vec!["x"]).unwrap();
+        g.add_node("z", vec!["y"]).unwrap();
+        g.add_node("g", vec!["z"]).unwrap();
+        assert_eq!(g.gdfo(&"f"), Some(2));
+        assert_eq!(g.gdfo(&"e"), Some(3));
+        assert_eq!(g.gdfo(&"x"), Some(1));
+        assert_eq!(g.gdfo(&"y"), Some(2));
+        assert_eq!(g.gdfo(&"z"), Some(3));
+        assert_eq!(g.gdfo(&"g"), Some(4));
+        assert_eq!(g.gdfo(&"b"), Some(4));
+        assert_eq!(g.gdfo(&"d"), Some(5));
+        assert_eq!(g.gdfo(&"a"), Some(5));
+        assert_eq!(g.gdfo(&"c"), Some(6));
+    }
+
+    /// Rust-side `heads()` is sentinel-free; callers are expected to filter
+    /// NULL themselves. These tests use the core method directly (not
+    /// `heads_with_origin`) and only test non-null cases — NULL-filtering
+    /// semantics are covered by existing `heads_with_origin_*` tests.
+    #[test]
+    fn test_heads_one_non_null() {
+        let mut g = ancestry_1();
+        for key in ["rev1", "rev2a", "rev2b", "rev3", "rev4"] {
+            assert_eq!(g.heads(vec![key]), set([key]));
+        }
+    }
+
+    #[test]
+    fn test_heads_single_from_ancestry_1() {
+        let mut g = ancestry_1();
+        assert_eq!(g.heads(vec!["rev1", "rev2a"]), set(["rev2a"]));
+        assert_eq!(g.heads(vec!["rev1", "rev2b"]), set(["rev2b"]));
+        assert_eq!(g.heads(vec!["rev1", "rev3"]), set(["rev3"]));
+        assert_eq!(g.heads(vec!["rev3", "rev2a"]), set(["rev3"]));
+        assert_eq!(g.heads(vec!["rev1", "rev4"]), set(["rev4"]));
+        assert_eq!(g.heads(vec!["rev2a", "rev4"]), set(["rev4"]));
+        assert_eq!(g.heads(vec!["rev2b", "rev4"]), set(["rev4"]));
+        assert_eq!(g.heads(vec!["rev3", "rev4"]), set(["rev4"]));
+    }
+
+    #[test]
+    fn test_heads_two_heads_from_ancestry_1() {
+        let mut g = ancestry_1();
+        assert_eq!(
+            g.heads(vec!["rev2a", "rev2b"]),
+            set(["rev2a", "rev2b"])
+        );
+        assert_eq!(
+            g.heads(vec!["rev3", "rev2b"]),
+            set(["rev3", "rev2b"])
+        );
+    }
+
+    #[test]
+    fn test_heads_criss_cross_fixture() {
+        let mut g = criss_cross();
+        assert_eq!(g.heads(vec!["rev2a", "rev1"]), set(["rev2a"]));
+        assert_eq!(g.heads(vec!["rev2b", "rev1"]), set(["rev2b"]));
+        assert_eq!(g.heads(vec!["rev3a", "rev1"]), set(["rev3a"]));
+        assert_eq!(g.heads(vec!["rev3b", "rev1"]), set(["rev3b"]));
+        assert_eq!(
+            g.heads(vec!["rev2a", "rev2b"]),
+            set(["rev2a", "rev2b"])
+        );
+        assert_eq!(g.heads(vec!["rev3a", "rev2a"]), set(["rev3a"]));
+        assert_eq!(g.heads(vec!["rev3a", "rev2b"]), set(["rev3a"]));
+        assert_eq!(
+            g.heads(vec!["rev3a", "rev2a", "rev2b"]),
+            set(["rev3a"])
+        );
+        assert_eq!(g.heads(vec!["rev3b", "rev2a"]), set(["rev3b"]));
+        assert_eq!(g.heads(vec!["rev3b", "rev2b"]), set(["rev3b"]));
+        assert_eq!(
+            g.heads(vec!["rev3b", "rev2a", "rev2b"]),
+            set(["rev3b"])
+        );
+        assert_eq!(
+            g.heads(vec!["rev3a", "rev3b"]),
+            set(["rev3a", "rev3b"])
+        );
+        assert_eq!(
+            g.heads(vec!["rev3a", "rev3b", "rev2a", "rev2b"]),
+            set(["rev3a", "rev3b"])
+        );
+    }
+
+    #[test]
+    fn test_heads_history_shortcut_fixture() {
+        let mut g = history_shortcut();
+        assert_eq!(
+            g.heads(vec!["rev2a", "rev2b", "rev2c"]),
+            set(["rev2a", "rev2b", "rev2c"])
+        );
+        assert_eq!(
+            g.heads(vec!["rev3a", "rev3b"]),
+            set(["rev3a", "rev3b"])
+        );
+        assert_eq!(
+            g.heads(vec!["rev2a", "rev3a", "rev3b"]),
+            set(["rev3a", "rev3b"])
+        );
+        assert_eq!(
+            g.heads(vec!["rev2a", "rev3b"]),
+            set(["rev2a", "rev3b"])
+        );
+        assert_eq!(
+            g.heads(vec!["rev2c", "rev3a"]),
+            set(["rev2c", "rev3a"])
+        );
+    }
+
+    #[test]
+    fn test_heads_alt_merge() {
+        let mut g = alt_merge();
+        assert_eq!(g.heads(vec!["a", "c"]), set(["c"]));
+    }
+
+    #[test]
+    fn test_heads_with_ghost_fixture() {
+        let mut g = with_ghost();
+        assert_eq!(g.heads(vec!["e", "g"]), set(["e", "g"]));
+        assert_eq!(g.heads(vec!["a", "c"]), set(["a", "c"]));
+        assert_eq!(g.heads(vec!["a", "g"]), set(["a", "g"]));
+        assert_eq!(g.heads(vec!["f", "g"]), set(["f", "g"]));
+        assert_eq!(g.heads(vec!["c", "g"]), set(["c"]));
+        assert_eq!(g.heads(vec!["c", "b", "d", "g"]), set(["c"]));
+        assert_eq!(g.heads(vec!["a", "c", "e", "g"]), set(["a", "c"]));
+        assert_eq!(g.heads(vec!["a", "c", "f"]), set(["a", "c"]));
+    }
+
+    #[test]
+    fn test_filling_in_ghosts_resets_head_cache() {
+        let mut g = with_ghost();
+        assert_eq!(g.heads(vec!["e", "g"]), set(["e", "g"]));
+        // Fill in the ghost so that `g` descends from `e`; the heads
+        // cache must be invalidated, otherwise the second query would
+        // return the stale result.
+        g.add_node("g", vec!["e"]).unwrap();
+        assert_eq!(g.heads(vec!["e", "g"]), set(["g"]));
+    }
+
+    /// Helper: assert that `topo_sort` yields a valid topological order
+    /// for the given parent map.
+    fn assert_topo_sort_order(edges: &[(&'static str, &[&'static str])]) {
+        let pm: FxHashMap<&'static str, Vec<&'static str>> =
+            edges.iter().map(|(k, ps)| (*k, ps.to_vec())).collect();
+        let g = KnownGraph::new(pm.clone(), true);
+        let result = g.topo_sort().unwrap();
+        assert_eq!(result.len(), pm.len());
+        let idx: FxHashMap<&str, usize> =
+            result.iter().enumerate().map(|(i, k)| (*k, i)).collect();
+        for (node, parents) in &pm {
+            for parent in parents {
+                if !pm.contains_key(parent) {
+                    continue; // ghost
+                }
+                assert!(
+                    idx[node] > idx[parent],
+                    "parent {parent} must come before child {node}: {:?}",
+                    result
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_topo_sort_empty() {
+        assert_topo_sort_order(&[]);
+    }
+
+    #[test]
+    fn test_topo_sort_easy() {
+        assert_topo_sort_order(&[("a", &[])]);
+    }
+
+    #[test]
+    fn test_topo_sort_cycle_simple() {
+        let pm = [("a", vec!["b"]), ("b", vec!["a"])];
+        let g = KnownGraph::new(pm, true);
+        assert!(matches!(g.topo_sort(), Err(Error::Cycle(_))));
+    }
+
+    #[test]
+    fn test_topo_sort_cycle_long() {
+        let pm = [("a", vec!["b"]), ("b", vec!["c"]), ("c", vec!["a"])];
+        let g = KnownGraph::new(pm, true);
+        assert!(matches!(g.topo_sort(), Err(Error::Cycle(_))));
+    }
+
+    #[test]
+    fn test_topo_sort_cycle_with_tail() {
+        let pm = [
+            ("a", vec!["b"]),
+            ("b", vec!["c"]),
+            ("c", vec!["d", "e"]),
+            ("d", vec!["a"]),
+            ("e", vec![]),
+        ];
+        let g = KnownGraph::new(pm, true);
+        assert!(matches!(g.topo_sort(), Err(Error::Cycle(_))));
+    }
+
+    #[test]
+    fn test_topo_sort_nontrivial() {
+        assert_topo_sort_order(&[
+            ("a", &["d"]),
+            ("b", &["e"]),
+            ("c", &["b", "e"]),
+            ("d", &[]),
+            ("e", &["a", "d"]),
+        ]);
+    }
+
+    #[test]
+    fn test_topo_sort_partial() {
+        assert_topo_sort_order(&[
+            ("a", &[]),
+            ("b", &["a"]),
+            ("c", &["a"]),
+            ("d", &["a"]),
+            ("e", &["b", "c", "d"]),
+            ("f", &["b", "c"]),
+            ("g", &["b", "c"]),
+            ("h", &["c", "d"]),
+            ("i", &["a", "b", "e", "f", "g"]),
+        ]);
+    }
+
+    #[test]
+    fn test_topo_sort_ghost_parent() {
+        // `b` is a ghost parent of `a` (not in the map). `c`'s parent
+        // `b` references the same. Output order must place `a` after `b`
+        // and `b` after `c` (treating `b` as a tail since it has no
+        // known parents in the output graph).
+        assert_topo_sort_order(&[("a", &["b"]), ("b", &["c"])]);
+    }
+
+    /// Merge-sort assertion helper: compares against Python-shaped
+    /// (key, merge_depth, revno, end_of_merge) tuples.
+    fn assert_merge_sort(
+        edges: &[(&'static str, &[&'static str])],
+        tip: &'static str,
+        expected: &[(&'static str, usize, &[usize], bool)],
+    ) {
+        let pm: FxHashMap<&'static str, Vec<&'static str>> =
+            edges.iter().map(|(k, ps)| (*k, ps.to_vec())).collect();
+        let g = KnownGraph::new(pm, true);
+        let result = g.merge_sort(tip).unwrap();
+        assert_eq!(
+            result.len(),
+            expected.len(),
+            "length mismatch: got {:?}",
+            result
+                .iter()
+                .map(|n| (n.key, n.merge_depth, n.revno.clone(), n.end_of_merge))
+                .collect::<Vec<_>>()
+        );
+        for (i, ((got_key, got_depth, got_eom), (exp_key, exp_depth, exp_revno, exp_eom))) in
+            result
+                .iter()
+                .map(|n| (n.key, n.merge_depth, n.end_of_merge))
+                .zip(expected.iter())
+                .enumerate()
+        {
+            let got_revno: Vec<usize> = result[i].revno.clone().into_iter().collect();
+            let exp_revno_v: Vec<usize> = exp_revno.to_vec();
+            assert_eq!(
+                (got_key, got_depth, got_revno.clone(), got_eom),
+                (*exp_key, *exp_depth, exp_revno_v.clone(), *exp_eom),
+                "row {i} mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn test_merge_sort_one_revision() {
+        assert_merge_sort(&[("id", &[])], "id", &[("id", 0, &[1], true)]);
+    }
+
+    #[test]
+    fn test_merge_sort_sequence_no_merges() {
+        assert_merge_sort(
+            &[("A", &[]), ("B", &["A"]), ("C", &["B"])],
+            "C",
+            &[
+                ("C", 0, &[3], false),
+                ("B", 0, &[2], false),
+                ("A", 0, &[1], true),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_merge_sort_sequence_with_merges() {
+        assert_merge_sort(
+            &[("A", &[]), ("B", &["A"]), ("C", &["A", "B"])],
+            "C",
+            &[
+                ("C", 0, &[2], false),
+                ("B", 1, &[1, 1, 1], true),
+                ("A", 0, &[1], true),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_merge_sort_merge_depth_with_nested_merges() {
+        assert_merge_sort(
+            &[
+                ("A", &["D", "B"]),
+                ("B", &["C", "F"]),
+                ("C", &["H"]),
+                ("D", &["H", "E"]),
+                ("E", &["G", "F"]),
+                ("F", &["G"]),
+                ("G", &["H"]),
+                ("H", &[]),
+            ],
+            "A",
+            &[
+                ("A", 0, &[3], false),
+                ("B", 1, &[1, 3, 2], false),
+                ("C", 1, &[1, 3, 1], true),
+                ("D", 0, &[2], false),
+                ("E", 1, &[1, 1, 2], false),
+                ("F", 2, &[1, 2, 1], true),
+                ("G", 1, &[1, 1, 1], true),
+                ("H", 0, &[1], true),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_merge_sort_end_of_merge_not_last() {
+        assert_merge_sort(
+            &[("A", &["B"]), ("B", &[])],
+            "A",
+            &[("A", 0, &[2], false), ("B", 0, &[1], true)],
+        );
+    }
+
+    #[test]
+    fn test_merge_sort_parallel_roots() {
+        assert_merge_sort(
+            &[("A", &[]), ("B", &[]), ("C", &["A", "B"])],
+            "C",
+            &[
+                ("C", 0, &[2], false),
+                ("B", 1, &[0, 1, 1], true),
+                ("A", 0, &[1], true),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_merge_sort_cycle_errors() {
+        // E <- D <- C <- B, B <- D creates a cycle B-C-D-B
+        let pm = [
+            ("A", vec![] as Vec<&'static str>),
+            ("B", vec!["D"]),
+            ("C", vec!["B"]),
+            ("D", vec!["C"]),
+            ("E", vec!["D"]),
+        ];
+        let g = KnownGraph::new(pm, true);
+        let r = g.merge_sort("E");
+        assert!(matches!(r, Err(Error::Cycle(_))));
+    }
 }
