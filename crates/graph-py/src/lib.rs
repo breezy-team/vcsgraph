@@ -772,6 +772,68 @@ fn sort_pynodes_by_hash(items: impl IntoIterator<Item = PyNode>) -> Vec<PyNode> 
     v
 }
 
+/// Lazy iterator yielding the lefthand ancestry of a starting key.
+///
+/// Mirrors the Python `Graph.iter_lefthand_ancestry` generator semantics:
+/// each `__next__` call walks one step down the left-most parent chain.
+/// Callers can break out of the iteration before the walk reaches a ghost
+/// sentinel, matching Python's early-exit behaviour.
+#[pyclass(name = "_LefthandAncestryIterator")]
+struct PyLefthandAncestryIterator {
+    provider: Py<PyAny>,
+    next_key: Option<Py<PyAny>>,
+    stop_keys: Py<PyAny>,
+    graph_py: Py<PyAny>,
+}
+
+#[pymethods]
+impl PyLefthandAncestryIterator {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self, py: Python) -> PyResult<Py<PyAny>> {
+        let key = match self.next_key.take() {
+            Some(k) => k,
+            None => return Err(pyo3::exceptions::PyStopIteration::new_err(())),
+        };
+        // Honour stop_keys (a Python container supporting `in`).
+        if self.stop_keys.bind(py).contains(&key)? {
+            return Err(pyo3::exceptions::PyStopIteration::new_err(()));
+        }
+        // Fetch the left-most parent for the next iteration. Python's
+        // generator raises RevisionNotPresent if the key is missing from
+        // the provider; mirror that exactly.
+        let key_list = pyo3::types::PyList::new(py, [key.clone_ref(py)])?;
+        let parent_map = self
+            .provider
+            .bind(py)
+            .call_method1("get_parent_map", (key_list,))?;
+        let parents = parent_map.get_item(key.clone_ref(py));
+        match parents {
+            Ok(ps) => {
+                let ps_iter: Vec<Py<PyAny>> = {
+                    let mut out = Vec::new();
+                    for item in ps.try_iter()? {
+                        out.push(item?.unbind());
+                    }
+                    out
+                };
+                if ps_iter.is_empty() {
+                    self.next_key = None;
+                } else {
+                    self.next_key = Some(ps_iter.into_iter().next().unwrap());
+                }
+                Ok(key)
+            }
+            Err(_) => Err(RevisionNotPresent::new_err((
+                key,
+                self.graph_py.clone_ref(py),
+            ))),
+        }
+    }
+}
+
 /// Adapter that wraps a graph whose keys are 1-tuples of ids. Each method
 /// takes ids, wraps them in tuples, delegates to the underlying graph,
 /// then unwraps the tuples in the response. Mirrors
@@ -1251,30 +1313,29 @@ impl PyGraph {
             })
     }
 
-    /// Iterate the left-hand ancestry from `start_key` until a key in
-    /// `stop_keys` is hit (or the origin is reached).
+    /// Return a lazy iterator over the lefthand ancestry of `start_key`.
+    ///
+    /// The iterator yields revisions one at a time, walking left-most
+    /// parents, and raises RevisionNotPresent if a key in the walk is
+    /// missing from the provider. `stop_keys` is any container supporting
+    /// the `in` operator; iteration stops when the current key is in it.
     #[pyo3(signature = (start_key, stop_keys=None))]
     fn iter_lefthand_ancestry(
-        &self,
+        slf: PyRef<'_, Self>,
         py: Python,
         start_key: Py<PyAny>,
         stop_keys: Option<Py<PyAny>>,
-    ) -> PyResult<Vec<Py<PyAny>>> {
-        let start = PyNode::from(start_key);
-        let stop: Vec<PyNode> = match stop_keys {
-            None => Vec::new(),
-            Some(obj) => {
-                let mut s = Vec::new();
-                for item in obj.bind(py).try_iter()? {
-                    s.push(PyNode::from(item?));
-                }
-                s
-            }
+    ) -> PyResult<PyLefthandAncestryIterator> {
+        let stop_keys = match stop_keys {
+            Some(s) => s,
+            None => pyo3::types::PyTuple::empty(py).into_any().unbind(),
         };
-        self.inner
-            .iter_lefthand_ancestry(start, stop)
-            .map(|v| v.into_iter().map(|n| n.0).collect())
-            .map_err(graph_error_to_py)
+        Ok(PyLefthandAncestryIterator {
+            provider: slf.provider_py.clone_ref(py),
+            next_key: Some(start_key),
+            stop_keys,
+            graph_py: slf.into_pyobject(py)?.into_any().unbind(),
+        })
     }
 
     /// Iterate ancestry, yielding `(key, parents_list_or_None)` pairs.
@@ -1898,5 +1959,6 @@ fn _graph_rs(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_class::<PyHeadsCache>()?;
     m.add_class::<PyFrozenHeadsCache>()?;
     m.add_class::<PyGraphThunkIdsToKeys>()?;
+    m.add_class::<PyLefthandAncestryIterator>()?;
     Ok(())
 }

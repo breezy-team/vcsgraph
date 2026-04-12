@@ -376,25 +376,14 @@ class Graph:
         yield from self._rs.iter_ancestry(revision_ids)
 
     def iter_lefthand_ancestry(self, start_key, stop_keys=None):
-        if stop_keys is None:
-            stop_keys = ()
-        next_key = start_key
+        """Iterate the lefthand ancestry of start_key.
 
-        def get_parents(key):
-            try:
-                return self._parents_provider.get_parent_map([key])[key]
-            except KeyError as err:
-                raise errors.RevisionNotPresent(next_key, self) from err
-
-        while True:
-            if next_key in stop_keys:
-                return
-            parents = get_parents(next_key)
-            yield next_key
-            if len(parents) == 0:
-                return
-            else:
-                next_key = parents[0]
+        Yields revisions in lefthand order. Callers may break early; the
+        walk is lazy and does not query further than the last yielded key.
+        Raises RevisionNotPresent if the walk reaches a key that is not in
+        the parents provider.
+        """
+        return self._rs.iter_lefthand_ancestry(start_key, stop_keys)
 
     def iter_topo_order(self, revisions):
         """Iterate through the input revisions in topological order.
