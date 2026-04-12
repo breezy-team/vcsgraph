@@ -3,7 +3,10 @@
 use vcs_graph::bfs::BfsState;
 use vcs_graph::graph::{Graph as RsGraph, GraphError};
 use vcs_graph::known_graph::KnownGraph as RsKnownGraph;
-use vcs_graph::{ChildMap, ParentMap, Parents, ParentsProvider, RevnoVec};
+use vcs_graph::{
+    CachingParentsProvider as RsCachingParentsProvider, ChildMap, ParentMap, Parents,
+    ParentsProvider, RevnoVec,
+};
 
 use pyo3::import_exception;
 use pyo3::prelude::*;
@@ -754,6 +757,129 @@ struct PyKnownGraphMergeSortNode {
     end_of_merge: bool,
 }
 
+/// Python binding for [`CachingParentsProvider`]. Wraps an inner Python
+/// parents provider (any object with a `get_parent_map(keys)` method) and
+/// caches every lookup so repeated queries don't re-hit the inner provider.
+///
+/// Mirrors `vcsgraph.graph.CachingParentsProvider`.
+#[pyclass(name = "CachingParentsProvider")]
+struct PyCachingParentsProvider {
+    inner: RsCachingParentsProvider<PyNode, PyParentsProviderAdapter>,
+    real_provider_py: Py<PyAny>,
+}
+
+#[pymethods]
+impl PyCachingParentsProvider {
+    /// Construct a caching wrapper around `parent_provider`, which must be
+    /// either a Python object with a `get_parent_map` method or `None` when
+    /// `get_parent_map` is supplied as a callable.
+    #[new]
+    #[pyo3(signature = (parent_provider=None, get_parent_map=None))]
+    fn new(
+        py: Python,
+        parent_provider: Option<Py<PyAny>>,
+        get_parent_map: Option<Py<PyAny>>,
+    ) -> PyResult<Self> {
+        let provider_obj = match (parent_provider, get_parent_map) {
+            (Some(p), None) => p,
+            (None, Some(cb)) => {
+                // Wrap the callable into a tiny Python shim that exposes
+                // a `get_parent_map` attribute, so the adapter can call it
+                // uniformly.
+                let builtins = py.import("builtins")?;
+                let type_ = builtins.getattr("type")?;
+                let ns = pyo3::types::PyDict::new(py);
+                ns.set_item("get_parent_map", cb)?;
+                let shim = type_.call1(("_CPPShim", (builtins.getattr("object")?,), ns))?;
+                shim.call0()?.into_any().unbind()
+            }
+            (Some(_), Some(_)) => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "Pass parent_provider OR get_parent_map, not both",
+                ))
+            }
+            (None, None) => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "Either parent_provider or get_parent_map must be supplied",
+                ))
+            }
+        };
+        let adapter = PyParentsProviderAdapter {
+            provider: provider_obj.clone_ref(py),
+        };
+        Ok(PyCachingParentsProvider {
+            inner: RsCachingParentsProvider::new(adapter),
+            real_provider_py: provider_obj,
+        })
+    }
+
+    fn __repr__(&self, py: Python) -> PyResult<String> {
+        let r = self.real_provider_py.bind(py).repr()?;
+        Ok(format!("CachingParentsProvider({})", r))
+    }
+
+    #[pyo3(signature = (cache_misses=true))]
+    fn enable_cache(&self, cache_misses: bool) -> PyResult<()> {
+        self.inner
+            .enable_cache(cache_misses)
+            .map_err(pyo3::exceptions::PyAssertionError::new_err)
+    }
+
+    fn disable_cache(&self) {
+        self.inner.disable_cache();
+    }
+
+    /// Return a snapshot of the cache as a Python dict, or `None` if
+    /// disabled.
+    fn get_cached_map<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        match self.inner.get_cached_map() {
+            None => Ok(None),
+            Some(map) => Ok(Some(cache_map_to_pydict(py, map)?)),
+        }
+    }
+
+    /// Backward-compatible access to the raw `_cache` attribute. Returns a
+    /// dict snapshot when the cache is enabled, `None` otherwise. The
+    /// Python tests read this directly, so mirror Python's behaviour of
+    /// exposing an empty dict rather than `None` for a freshly-enabled
+    /// cache.
+    #[getter]
+    fn _cache<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        self.get_cached_map(py)
+    }
+
+    fn get_cached_parent_map<'py>(
+        &self,
+        py: Python<'py>,
+        keys: Py<PyAny>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let nodes = extract_iter_pynodes(py, &keys)?;
+        let hs: HashSet<PyNode> = nodes.into_iter().collect();
+        let pm = self.inner.get_cached_parent_map(&hs);
+        parent_map_to_pydict(py, pm)
+    }
+
+    fn get_parent_map<'py>(
+        &self,
+        py: Python<'py>,
+        keys: Py<PyAny>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let nodes = extract_iter_pynodes(py, &keys)?;
+        let hs: HashSet<PyNode> = nodes.into_iter().collect();
+        let pm = self.inner.get_parent_map(&hs);
+        parent_map_to_pydict(py, pm)
+    }
+
+    fn note_missing_key(&self, key: Py<PyAny>) {
+        self.inner.note_missing_key(PyNode::from(key));
+    }
+
+    #[getter]
+    fn missing_keys<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PySet>> {
+        pynodes_to_pyset(py, self.inner.missing_keys())
+    }
+}
+
 /// Adapter letting a Python parents provider satisfy Rust's `ParentsProvider`
 /// trait. Holds a raw `Py<PyAny>` and dispatches `get_parent_map(keys)` via
 /// the GIL.
@@ -812,6 +938,25 @@ fn parent_map_to_pydict<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     for (k, v) in pm {
+        match v {
+            Parents::Known(ps) => {
+                let list: Vec<Py<PyAny>> = ps.into_iter().map(|n| n.0).collect();
+                d.set_item(k.0, list)?;
+            }
+            Parents::Ghost => {
+                d.set_item(k.0, py.None())?;
+            }
+        }
+    }
+    Ok(d)
+}
+
+fn cache_map_to_pydict<'py>(
+    py: Python<'py>,
+    map: rustc_hash::FxHashMap<PyNode, Parents<PyNode>>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    for (k, v) in map {
         match v {
             Parents::Known(ps) => {
                 let list: Vec<Py<PyAny>> = ps.into_iter().map(|n| n.0).collect();
@@ -1475,5 +1620,6 @@ fn _graph_rs(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_class::<PyKnownGraphNodesView>()?;
     m.add_class::<PyGraph>()?;
     m.add_class::<PyBFSearcher>()?;
+    m.add_class::<PyCachingParentsProvider>()?;
     Ok(())
 }

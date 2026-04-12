@@ -1657,19 +1657,19 @@ class TestCachingParentsProvider(TestCase):
 
     def setUp(self):
         super().setUp()
-        dict_pp = _mod_graph.DictParentsProvider({b"a": (b"b",)})
+        dict_pp = _mod_graph.DictParentsProvider({b"a": [b"b"]})
         self.inst_pp = InstrumentedParentsProvider(dict_pp)
         self.caching_pp = _mod_graph.CachingParentsProvider(self.inst_pp)
 
     def test_get_parent_map(self):
         """Requesting the same revision should be returned from cache."""
         self.assertEqual({}, self.caching_pp._cache)
-        self.assertEqual({b"a": (b"b",)}, self.caching_pp.get_parent_map([b"a"]))
+        self.assertEqual({b"a": [b"b"]}, self.caching_pp.get_parent_map([b"a"]))
         self.assertEqual([b"a"], self.inst_pp.calls)
-        self.assertEqual({b"a": (b"b",)}, self.caching_pp.get_parent_map([b"a"]))
+        self.assertEqual({b"a": [b"b"]}, self.caching_pp.get_parent_map([b"a"]))
         # No new call, as it should have been returned from the cache
         self.assertEqual([b"a"], self.inst_pp.calls)
-        self.assertEqual({b"a": (b"b",)}, self.caching_pp._cache)
+        self.assertEqual({b"a": [b"b"]}, self.caching_pp._cache)
 
     def test_get_parent_map_not_present(self):
         """The cache should also track when a revision doesn't exist."""
@@ -1683,13 +1683,13 @@ class TestCachingParentsProvider(TestCase):
         """Anything that can be returned from cache, should be."""
         self.assertEqual({}, self.caching_pp.get_parent_map([b"b"]))
         self.assertEqual([b"b"], self.inst_pp.calls)
-        self.assertEqual({b"a": (b"b",)}, self.caching_pp.get_parent_map([b"a", b"b"]))
+        self.assertEqual({b"a": [b"b"]}, self.caching_pp.get_parent_map([b"a", b"b"]))
         self.assertEqual([b"b", b"a"], self.inst_pp.calls)
 
     def test_get_parent_map_repeated(self):
         """Asking for the same parent 2x will only forward 1 request."""
         self.assertEqual(
-            {b"a": (b"b",)}, self.caching_pp.get_parent_map([b"b", b"a", b"b"])
+            {b"a": [b"b"]}, self.caching_pp.get_parent_map([b"b", b"a", b"b"])
         )
         # Use sorted because we don't care about the order, just that each is
         # only present 1 time.
@@ -1705,9 +1705,9 @@ class TestCachingParentsProvider(TestCase):
     def test_get_cached_parent_map(self):
         self.assertEqual({}, self.caching_pp.get_cached_parent_map([b"a"]))
         self.assertEqual([], self.inst_pp.calls)
-        self.assertEqual({b"a": (b"b",)}, self.caching_pp.get_parent_map([b"a"]))
+        self.assertEqual({b"a": [b"b"]}, self.caching_pp.get_parent_map([b"a"]))
         self.assertEqual([b"a"], self.inst_pp.calls)
-        self.assertEqual({b"a": (b"b",)}, self.caching_pp.get_cached_parent_map([b"a"]))
+        self.assertEqual({b"a": [b"b"]}, self.caching_pp.get_cached_parent_map([b"a"]))
 
 
 class TestCachingParentsProviderExtras(TestCase):

@@ -30,7 +30,9 @@ pub use graph::{Graph, GraphError};
 pub mod known_graph;
 pub use known_graph::{Key, KnownGraph, MergeSortNode};
 mod parents_provider;
-pub use parents_provider::{DictParentsProvider, ParentsProvider, StackedParentsProvider};
+pub use parents_provider::{
+    CachingParentsProvider, DictParentsProvider, ParentsProvider, StackedParentsProvider,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Parents<K: Clone + PartialEq + Eq> {
