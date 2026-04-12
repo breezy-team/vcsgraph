@@ -1100,6 +1100,129 @@ impl PyGraph {
         Ok(result.into_iter().map(|n| n.0).collect())
     }
 
+    /// Find the unique ancestors for a revision versus others.
+    ///
+    /// This returns the ancestry of unique_revision, excluding all revisions
+    /// in the ancestry of common_revisions. If unique_revision is in the
+    /// ancestry, then the empty set will be returned.
+    ///
+    /// :param unique_revision: The revision_id whose ancestry we are
+    ///     interested in.
+    ///     (XXX: Would this API be better if we allowed multiple revisions on
+    ///     to be searched here?)
+    /// :param common_revisions: Revision_ids of ancestries to exclude.
+    /// :return: A set of revisions in the ancestry of unique_revision
+    ///
+    /// Algorithm description:
+    ///
+    /// 1) Walk backwards from the unique node and all common nodes.
+    /// 2) When a node is seen by both sides, stop searching it in the unique
+    ///    walker, include it in the common walker.
+    /// 3) Stop searching when there are no nodes left for the unique walker.
+    ///    At this point, you have a maximal set of unique nodes. Some of
+    ///    them may actually be common, and you haven't reached them yet.
+    /// 4) Start new searchers for the unique nodes, seeded with the
+    ///    information you have so far.
+    /// 5) Continue searching, stopping the common searches when the search
+    ///    tip is an ancestor of all unique nodes.
+    /// 6) Aggregate together unique searchers when they are searching the
+    ///    same tips. When all unique searchers are searching the same node,
+    ///    stop move it to a single 'all_unique_searcher'.
+    /// 7) The 'all_unique_searcher' represents the very 'tip' of searching.
+    ///    Most of the time this produces very little important information.
+    ///    So don't step it as quickly as the other searchers.
+    /// 8) Search is done when all common searchers have completed.
+    fn find_unique_ancestors<'py>(
+        &self,
+        py: Python<'py>,
+        unique_revision: Py<PyAny>,
+        common_revisions: Py<PyAny>,
+    ) -> PyResult<Bound<'py, pyo3::types::PySet>> {
+        let unique = PyNode::from(unique_revision);
+        let commons = extract_iter_pynodes(py, &common_revisions)?;
+        let result = self.inner.find_unique_ancestors(unique, commons);
+        pynodes_to_pyset(py, result)
+    }
+
+    /// Determine the graph difference between two revisions.
+    fn find_difference<'py>(
+        &self,
+        py: Python<'py>,
+        left_revision: Py<PyAny>,
+        right_revision: Py<PyAny>,
+    ) -> PyResult<(
+        Bound<'py, pyo3::types::PySet>,
+        Bound<'py, pyo3::types::PySet>,
+    )> {
+        let left = PyNode::from(left_revision);
+        let right = PyNode::from(right_revision);
+        let (l, r) = self.inner.find_difference(left, right);
+        Ok((pynodes_to_pyset(py, l)?, pynodes_to_pyset(py, r)?))
+    }
+
+    /// Find a unique LCA.
+    ///
+    /// Find lowest common ancestors.  If there is no unique common
+    /// ancestor, find the lowest common ancestors of those ancestors.
+    ///
+    /// Iteration stops when a unique lowest common ancestor is found.
+    /// The graph origin is necessarily a unique lowest common ancestor.
+    ///
+    /// Note that None is not an acceptable substitute for NULL_REVISION.
+    /// in the input for this method.
+    ///
+    /// :param count_steps: If True, the return value will be a tuple of
+    ///     (unique_lca, steps) where steps is the number of times that
+    ///     find_lca was run.  If False, only unique_lca is returned.
+    #[pyo3(signature = (left_revision, right_revision, count_steps=false))]
+    fn find_unique_lca(
+        &self,
+        py: Python,
+        left_revision: Py<PyAny>,
+        right_revision: Py<PyAny>,
+        count_steps: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let left = PyNode::from(left_revision.clone_ref(py));
+        let right = PyNode::from(right_revision.clone_ref(py));
+        let null_bytes = pyo3::types::PyBytes::new(py, NULL_REVISION);
+        let null = PyNode::from(null_bytes.into_any().unbind());
+        match self.inner.find_unique_lca(left, right, &null) {
+            Some((key, steps)) => {
+                if count_steps {
+                    Ok(pyo3::types::PyTuple::new(
+                        py,
+                        [key.0, steps.into_pyobject(py)?.into_any().unbind()],
+                    )?
+                    .into_any()
+                    .unbind())
+                } else {
+                    Ok(key.0)
+                }
+            }
+            None => Err(NoCommonAncestor::new_err((left_revision, right_revision))),
+        }
+    }
+
+    /// Find the first lefthand ancestor of tip_key that merged merged_key.
+    ///
+    /// We do this by first finding the descendants of merged_key, then
+    /// walking through the lefthand ancestry of tip_key until we find a key
+    /// that doesn't descend from merged_key.  Its child is the key that
+    /// merged merged_key.
+    ///
+    /// :return: The first lefthand ancestor of tip_key to merge merged_key.
+    ///     merged_key if it is a lefthand ancestor of tip_key.
+    ///     None if no ancestor of tip_key merged merged_key.
+    fn find_lefthand_merger(
+        &self,
+        merged_key: Py<PyAny>,
+        tip_key: Py<PyAny>,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        let merged = PyNode::from(merged_key);
+        let tip = PyNode::from(tip_key);
+        Ok(self.inner.find_lefthand_merger(merged, tip).map(|n| n.0))
+    }
+
     /// Find descendants of `old_key` that are ancestors of `new_key`.
     fn find_descendants<'py>(
         &self,
@@ -1134,6 +1257,7 @@ impl PyGraph {
 
 import_exception!(vcsgraph.errors, GhostRevisionsHaveNoRevno);
 import_exception!(vcsgraph.errors, InvalidRevisionId);
+import_exception!(vcsgraph.errors, NoCommonAncestor);
 import_exception!(vcsgraph.errors, RevisionNotPresent);
 
 fn graph_error_to_py(e: GraphError<PyNode>) -> PyErr {

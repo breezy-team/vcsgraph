@@ -458,4 +458,44 @@ mod tests {
         assert!(found.contains(&"new_root"));
         assert!(ghosts.contains(&"ghost"));
     }
+
+    /// Translated from `test_breadth_first_search_start_ghosts` in
+    /// `vcsgraph/tests/test_graph.py`: starting with only a ghost, the first
+    /// step yields just the ghost and then the search is exhausted.
+    #[test]
+    fn start_with_only_a_ghost() {
+        let p = provider(&[("a-ghost", &[])]);
+        let mut s = BfsState::new(["a-ghost"]);
+        assert_eq!(s.next_set(&p), Some(as_set(["a-ghost"])));
+        assert_eq!(s.next_set(&p), None);
+    }
+
+    /// Translated from `test_breadth_first_change_search`: stop the current
+    /// frontier, start a new search from an unrelated revision, and
+    /// verify the BFS picks up the new revision's ancestors.
+    #[test]
+    fn change_search_via_stop_and_start() {
+        let p = provider(&[
+            ("head", &["present"]),
+            ("present", &["stopped"]),
+            ("stopped", &[]),
+            ("other", &["other_2"]),
+            ("other_2", &[]),
+        ]);
+        let mut s = BfsState::new(["head"]);
+        assert_eq!(s.next_with_ghosts(&p), Some((as_set(["head"]), as_set([]))));
+        assert_eq!(
+            s.next_with_ghosts(&p),
+            Some((as_set(["present"]), as_set([])))
+        );
+        assert_eq!(s.stop_searching_any(["present"]), as_set(["present"]));
+        let (present, ghosts) = s.start_searching(["other", "other_ghost"], &p).unwrap();
+        assert_eq!(present, as_set(["other"]));
+        assert_eq!(ghosts, as_set(["other_ghost"]));
+        assert_eq!(
+            s.next_with_ghosts(&p),
+            Some((as_set(["other_2"]), as_set([])))
+        );
+        assert_eq!(s.next_with_ghosts(&p), None);
+    }
 }
