@@ -83,12 +83,17 @@ impl<K: Hash + Eq + Clone> KnownGraph<K> {
     where
         I: IntoIterator<Item = (K, Vec<K>)>,
     {
+        let iter = parent_map.into_iter();
+        // Use the lower bound of size_hint to pre-allocate when the caller
+        // passes a sized iterator (HashMap, Vec, etc). Ghosts will grow the
+        // map a little beyond this.
+        let cap = iter.size_hint().0;
         let mut g = KnownGraph {
-            nodes: FxHashMap::default(),
+            nodes: HashMap::with_capacity_and_hasher(cap, Default::default()),
             known_heads: FxHashMap::default(),
             do_cache,
         };
-        g.initialize_nodes(parent_map);
+        g.initialize_nodes(iter);
         g.find_gdfo();
         g
     }
@@ -353,7 +358,7 @@ impl<K: Hash + Eq + Clone> KnownGraph<K> {
         let mut pending = self.find_tails();
         let mut num_seen_parents: FxHashMap<K, usize> =
             self.nodes.keys().map(|k| (k.clone(), 0)).collect();
-        let mut topo_order: Vec<K> = Vec::new();
+        let mut topo_order: Vec<K> = Vec::with_capacity(self.nodes.len());
         while let Some(node_key) = pending.pop() {
             let node = &self.nodes[&node_key];
             // Skip ghosts in the output (matches Python behavior).
