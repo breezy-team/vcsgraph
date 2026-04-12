@@ -3,7 +3,10 @@
 use vcs_graph::bfs::BfsState;
 use vcs_graph::graph::{Graph as RsGraph, GraphError};
 use vcs_graph::known_graph::KnownGraph as RsKnownGraph;
-use vcs_graph::{ChildMap, ParentMap, Parents, ParentsProvider, RevnoVec};
+use vcs_graph::{
+    CachingParentsProvider as RsCachingParentsProvider, ChildMap, ParentMap, Parents,
+    ParentsProvider, RevnoVec,
+};
 
 use pyo3::import_exception;
 use pyo3::prelude::*;
@@ -168,33 +171,189 @@ fn collapse_linear_regions(parent_map: ParentMap<PyNode>) -> PyResult<ParentMap<
     Ok(vcs_graph::collapse_linear_regions::<PyNode>(&parent_map))
 }
 
-#[pyclass]
-struct PyParentsProvider {
-    provider: Box<dyn vcs_graph::ParentsProvider<PyNode> + Send + Sync>,
+/// A parents provider for Graph objects, backed by a dict.
+///
+/// Mirrors `vcsgraph.graph.DictParentsProvider`: takes a mapping of
+/// `{key: parents_list}` and serves `get_parent_map` lookups from it.
+#[pyclass(name = "DictParentsProvider", dict)]
+struct PyDictParentsProvider {
+    inner: vcs_graph::DictParentsProvider<PyNode>,
+    ancestry: Py<PyAny>,
 }
 
 #[pymethods]
-impl PyParentsProvider {
-    fn get_parent_map(&mut self, py: Python, keys: Py<PyAny>) -> PyResult<ParentMap<PyNode>> {
-        let mut hash_key: HashSet<PyNode> = HashSet::new();
-        for key in keys.bind(py).try_iter()? {
-            hash_key.insert(key?.into());
+impl PyDictParentsProvider {
+    #[new]
+    fn new(py: Python, ancestry: Py<PyAny>) -> PyResult<Self> {
+        // Extract the mapping into a ParentMap. We accept any dict-like
+        // object by calling `.items()`.
+        let items = ancestry.bind(py).call_method0("items")?;
+        let mut pm = ParentMap::new();
+        for item in items.try_iter()? {
+            let item = item?;
+            let k: Py<PyAny> = item.get_item(0)?.unbind();
+            let v_obj = item.get_item(1)?;
+            let mut parents: Vec<PyNode> = Vec::new();
+            for p in v_obj.try_iter()? {
+                parents.push(PyNode::from(p?.unbind()));
+            }
+            pm.insert(PyNode::from(k), Parents::Known(parents));
         }
-        Ok(self
-            .provider
-            .get_parent_map(&hash_key.into_iter().collect()))
+        Ok(PyDictParentsProvider {
+            inner: vcs_graph::DictParentsProvider::<PyNode>::new(pm),
+            ancestry,
+        })
+    }
+
+    /// The underlying mapping, preserved as the original Python object.
+    #[getter]
+    fn ancestry(&self, py: Python) -> Py<PyAny> {
+        self.ancestry.clone_ref(py)
+    }
+
+    fn __repr__(&self, py: Python) -> PyResult<String> {
+        let r = self.ancestry.bind(py).repr()?;
+        Ok(format!("DictParentsProvider({})", r))
+    }
+
+    fn get_parent_map<'py>(
+        &self,
+        py: Python<'py>,
+        keys: Py<PyAny>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let nodes = extract_iter_pynodes(py, &keys)?;
+        let hs: HashSet<PyNode> = nodes.into_iter().collect();
+        let pm = self.inner.get_parent_map(&hs);
+        parent_map_to_pydict(py, pm)
     }
 }
 
-#[pyfunction]
-fn DictParentsProvider(
-    py: Python<'_>,
-    parent_map: ParentMap<PyNode>,
-) -> PyResult<Bound<'_, PyParentsProvider>> {
-    let provider = PyParentsProvider {
-        provider: Box::new(vcs_graph::DictParentsProvider::<PyNode>::new(parent_map)),
-    };
-    Bound::new(py, provider)
+impl ParentsProvider<PyNode> for PyDictParentsProvider {
+    fn get_parent_map(&self, keys: &HashSet<PyNode>) -> ParentMap<PyNode> {
+        self.inner.get_parent_map(keys)
+    }
+}
+
+/// A parents provider which stacks multiple child providers. Each child is
+/// queried in order, matching `vcsgraph.graph.StackedParentsProvider`.
+///
+/// If a child exposes `get_cached_parent_map`, that fast path is queried
+/// first for all children before any full `get_parent_map` call — just
+/// like the Python version.
+#[pyclass(name = "StackedParentsProvider")]
+struct PyStackedParentsProvider {
+    parent_providers: Vec<Py<PyAny>>,
+}
+
+#[pymethods]
+impl PyStackedParentsProvider {
+    #[new]
+    fn new(py: Python, parent_providers: Py<PyAny>) -> PyResult<Self> {
+        let mut providers = Vec::new();
+        for p in parent_providers.bind(py).try_iter()? {
+            providers.push(p?.unbind());
+        }
+        Ok(PyStackedParentsProvider {
+            parent_providers: providers,
+        })
+    }
+
+    fn __repr__(&self, py: Python) -> PyResult<String> {
+        let list =
+            pyo3::types::PyList::new(py, self.parent_providers.iter().map(|p| p.clone_ref(py)))?;
+        let r = list.repr()?;
+        Ok(format!("StackedParentsProvider({})", r))
+    }
+
+    fn get_parent_map<'py>(
+        &self,
+        py: Python<'py>,
+        keys: Py<PyAny>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let found = PyDict::new(py);
+        let remaining = pyo3::types::PySet::empty(py)?;
+        for k in keys.bind(py).try_iter()? {
+            remaining.add(k?.unbind())?;
+        }
+
+        // First pass: any provider that implements get_cached_parent_map
+        // gets queried cheaply before we hit the slow path.
+        for pp in &self.parent_providers {
+            if remaining.is_empty() {
+                break;
+            }
+            let bound = pp.bind(py);
+            let get_cached = bound.getattr("get_cached_parent_map");
+            let Ok(get_cached) = get_cached else {
+                continue;
+            };
+            if get_cached.is_none() {
+                continue;
+            }
+            let new_found = get_cached.call1((remaining.clone(),))?;
+            let new_found_dict = new_found.cast::<PyDict>()?;
+            for (k, v) in new_found_dict.iter() {
+                found.set_item(&k, v)?;
+                remaining.discard(&k)?;
+            }
+        }
+        if remaining.is_empty() {
+            return Ok(found);
+        }
+
+        // Second pass: full get_parent_map calls, in order.
+        for pp in &self.parent_providers {
+            if remaining.is_empty() {
+                break;
+            }
+            let bound = pp.bind(py);
+            let new_found = match bound.call_method1("get_parent_map", (remaining.clone(),)) {
+                Ok(r) => r,
+                Err(err) => {
+                    // Match Python's behaviour of catching UnsupportedOperation
+                    // and moving on.
+                    if err.get_type(py).is(&py
+                        .import("vcsgraph.errors")?
+                        .getattr("UnsupportedOperation")?)
+                    {
+                        continue;
+                    }
+                    return Err(err);
+                }
+            };
+            let new_found_dict = new_found.cast::<PyDict>()?;
+            for (k, v) in new_found_dict.iter() {
+                found.set_item(&k, v)?;
+                remaining.discard(&k)?;
+            }
+        }
+        Ok(found)
+    }
+}
+
+/// A parents provider that wraps any `get_parent_map`-like callable.
+///
+/// Mirrors `vcsgraph.graph.CallableToParentsProviderAdapter`.
+#[pyclass(name = "CallableToParentsProviderAdapter")]
+struct PyCallableToParentsProviderAdapter {
+    callable: Py<PyAny>,
+}
+
+#[pymethods]
+impl PyCallableToParentsProviderAdapter {
+    #[new]
+    fn new(callable: Py<PyAny>) -> Self {
+        PyCallableToParentsProviderAdapter { callable }
+    }
+
+    fn __repr__(&self, py: Python) -> PyResult<String> {
+        let r = self.callable.bind(py).repr()?;
+        Ok(format!("CallableToParentsProviderAdapter({})", r))
+    }
+
+    fn get_parent_map(&self, py: Python, keys: Py<PyAny>) -> PyResult<Py<PyAny>> {
+        Ok(self.callable.bind(py).call1((keys,))?.unbind())
+    }
 }
 
 #[pyclass]
@@ -754,6 +913,419 @@ struct PyKnownGraphMergeSortNode {
     end_of_merge: bool,
 }
 
+/// Sort a collection of PyNodes by hash for use as a deterministic cache
+/// key. Collisions only hurt cache hit rate, not correctness, because two
+/// different sets can't produce identical sorted Vecs within a process.
+fn sort_pynodes_by_hash(items: impl IntoIterator<Item = PyNode>) -> Vec<PyNode> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut v: Vec<PyNode> = items.into_iter().collect();
+    v.sort_by_key(|n| {
+        let mut h = DefaultHasher::new();
+        n.hash(&mut h);
+        h.finish()
+    });
+    v
+}
+
+/// Lazy iterator yielding the lefthand ancestry of a starting key.
+///
+/// Mirrors the Python `Graph.iter_lefthand_ancestry` generator semantics:
+/// each `__next__` call walks one step down the left-most parent chain.
+/// Callers can break out of the iteration before the walk reaches a ghost
+/// sentinel, matching Python's early-exit behaviour.
+#[pyclass(name = "_LefthandAncestryIterator")]
+struct PyLefthandAncestryIterator {
+    provider: Py<PyAny>,
+    next_key: Option<Py<PyAny>>,
+    stop_keys: Py<PyAny>,
+    graph_py: Py<PyAny>,
+}
+
+#[pymethods]
+impl PyLefthandAncestryIterator {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self, py: Python) -> PyResult<Py<PyAny>> {
+        let key = match self.next_key.take() {
+            Some(k) => k,
+            None => return Err(pyo3::exceptions::PyStopIteration::new_err(())),
+        };
+        // Honour stop_keys (a Python container supporting `in`).
+        if self.stop_keys.bind(py).contains(&key)? {
+            return Err(pyo3::exceptions::PyStopIteration::new_err(()));
+        }
+        // Fetch the left-most parent for the next iteration. Python's
+        // generator raises RevisionNotPresent if the key is missing from
+        // the provider; mirror that exactly.
+        let key_list = pyo3::types::PyList::new(py, [key.clone_ref(py)])?;
+        let parent_map = self
+            .provider
+            .bind(py)
+            .call_method1("get_parent_map", (key_list,))?;
+        let parents = parent_map.get_item(key.clone_ref(py));
+        match parents {
+            Ok(ps) => {
+                let ps_iter: Vec<Py<PyAny>> = {
+                    let mut out = Vec::new();
+                    for item in ps.try_iter()? {
+                        out.push(item?.unbind());
+                    }
+                    out
+                };
+                if ps_iter.is_empty() {
+                    self.next_key = None;
+                } else {
+                    self.next_key = Some(ps_iter.into_iter().next().unwrap());
+                }
+                Ok(key)
+            }
+            Err(_) => Err(RevisionNotPresent::new_err((
+                key,
+                self.graph_py.clone_ref(py),
+            ))),
+        }
+    }
+}
+
+/// Adapter that wraps a graph whose keys are 1-tuples of ids. Each method
+/// takes ids, wraps them in tuples, delegates to the underlying graph,
+/// then unwraps the tuples in the response. Mirrors
+/// `vcsgraph.graph.GraphThunkIdsToKeys`.
+#[pyclass(name = "GraphThunkIdsToKeys")]
+struct PyGraphThunkIdsToKeys {
+    graph: Py<PyAny>,
+}
+
+#[pymethods]
+impl PyGraphThunkIdsToKeys {
+    #[new]
+    fn new(graph: Py<PyAny>) -> Self {
+        PyGraphThunkIdsToKeys { graph }
+    }
+
+    fn topo_sort(&self, py: Python) -> PyResult<Vec<Py<PyAny>>> {
+        let result = self.graph.bind(py).call_method0("topo_sort")?;
+        let mut out = Vec::new();
+        for item in result.try_iter()? {
+            let tup = item?;
+            out.push(tup.get_item(0)?.unbind());
+        }
+        Ok(out)
+    }
+
+    fn heads<'py>(
+        &self,
+        py: Python<'py>,
+        ids: Py<PyAny>,
+    ) -> PyResult<Bound<'py, pyo3::types::PySet>> {
+        let mut as_keys: Vec<Py<PyAny>> = Vec::new();
+        for item in ids.bind(py).try_iter()? {
+            let item = item?;
+            let tup = pyo3::types::PyTuple::new(py, [item.unbind()])?;
+            as_keys.push(tup.into_any().unbind());
+        }
+        let head_keys = self
+            .graph
+            .bind(py)
+            .call_method1("heads", (pyo3::types::PyList::new(py, as_keys)?,))?;
+        let mut out_items: Vec<Py<PyAny>> = Vec::new();
+        for h in head_keys.try_iter()? {
+            let h = h?;
+            out_items.push(h.get_item(0)?.unbind());
+        }
+        pyo3::types::PySet::new(py, out_items)
+    }
+
+    fn merge_sort(&self, py: Python, tip_revision: Py<PyAny>) -> PyResult<Py<PyAny>> {
+        let tip_tuple = pyo3::types::PyTuple::new(py, [tip_revision])?;
+        let nodes = self
+            .graph
+            .bind(py)
+            .call_method1("merge_sort", (tip_tuple,))?;
+        for item in nodes.try_iter()? {
+            let item = item?;
+            let key = item.getattr("key")?;
+            let unwrapped = key.get_item(0)?;
+            item.setattr("key", unwrapped)?;
+        }
+        Ok(nodes.unbind())
+    }
+
+    fn add_node(&self, py: Python, revision: Py<PyAny>, parents: Py<PyAny>) -> PyResult<()> {
+        let rev_tuple = pyo3::types::PyTuple::new(py, [revision])?;
+        let mut parent_tuples: Vec<Py<PyAny>> = Vec::new();
+        for p in parents.bind(py).try_iter()? {
+            let p = p?;
+            let tup = pyo3::types::PyTuple::new(py, [p.unbind()])?;
+            parent_tuples.push(tup.into_any().unbind());
+        }
+        self.graph.bind(py).call_method1(
+            "add_node",
+            (rev_tuple, pyo3::types::PyList::new(py, parent_tuples)?),
+        )?;
+        Ok(())
+    }
+}
+
+/// A cache of results for graph heads() calls.
+///
+/// The cache key is the unordered set of input keys; the value is the
+/// `.heads()` result for that set. Every call returns a fresh mutable set
+/// so callers can modify the result without affecting later lookups —
+/// matches `vcsgraph.graph.HeadsCache`.
+#[pyclass(name = "HeadsCache")]
+struct PyHeadsCache {
+    graph: Py<PyAny>,
+    cache: std::sync::Mutex<std::collections::HashMap<Vec<PyNode>, Vec<PyNode>>>,
+}
+
+#[pymethods]
+impl PyHeadsCache {
+    #[new]
+    fn new(graph: Py<PyAny>) -> Self {
+        PyHeadsCache {
+            graph,
+            cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// The underlying graph. Exposed so Python callers can reach
+    /// `cache.graph` just like the pure-Python version allowed.
+    #[getter]
+    fn graph(&self, py: Python) -> Py<PyAny> {
+        self.graph.clone_ref(py)
+    }
+
+    /// Return the heads of `keys`. The result is a mutable Python set;
+    /// callers may modify it without affecting future lookups.
+    fn heads<'py>(
+        &self,
+        py: Python<'py>,
+        keys: Py<PyAny>,
+    ) -> PyResult<Bound<'py, pyo3::types::PySet>> {
+        let nodes = extract_iter_pynodes(py, &keys)?;
+        let key = sort_pynodes_by_hash(nodes);
+        {
+            let cache = self.cache.lock().unwrap();
+            if let Some(cached) = cache.get(&key) {
+                return pyo3::types::PySet::new(py, cached.iter().map(|n| n.0.clone_ref(py)));
+            }
+        }
+        // Cache miss: delegate to the wrapped graph.
+        let result: Vec<PyNode> = {
+            let heads = self.graph.bind(py).call_method1(
+                "heads",
+                (pyo3::types::PyList::new(
+                    py,
+                    key.iter().map(|n| n.0.clone_ref(py)),
+                )?,),
+            )?;
+            let mut out = Vec::new();
+            for item in heads.try_iter()? {
+                out.push(PyNode::from(item?));
+            }
+            out
+        };
+        let mut cache = self.cache.lock().unwrap();
+        cache.insert(key, result.clone());
+        pyo3::types::PySet::new(py, result.into_iter().map(|n| n.0))
+    }
+}
+
+/// A cache of `heads()` results that returns frozen sets.
+///
+/// Same as [`PyHeadsCache`] but the results are immutable. Matches
+/// `vcsgraph.graph.FrozenHeadsCache`.
+#[pyclass(name = "FrozenHeadsCache")]
+struct PyFrozenHeadsCache {
+    graph: Py<PyAny>,
+    cache: std::sync::Mutex<std::collections::HashMap<Vec<PyNode>, Vec<PyNode>>>,
+}
+
+#[pymethods]
+impl PyFrozenHeadsCache {
+    #[new]
+    fn new(graph: Py<PyAny>) -> Self {
+        PyFrozenHeadsCache {
+            graph,
+            cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    #[getter]
+    fn graph(&self, py: Python) -> Py<PyAny> {
+        self.graph.clone_ref(py)
+    }
+
+    /// Return the heads of `keys` as a frozenset.
+    fn heads(&self, py: Python, keys: Py<PyAny>) -> PyResult<Py<PyAny>> {
+        let nodes = extract_iter_pynodes(py, &keys)?;
+        let key = sort_pynodes_by_hash(nodes);
+        {
+            let cache = self.cache.lock().unwrap();
+            if let Some(cached) = cache.get(&key) {
+                let fs = py.import("builtins")?.getattr("frozenset")?;
+                let items: Vec<Py<PyAny>> = cached.iter().map(|n| n.0.clone_ref(py)).collect();
+                return Ok(fs.call1((items,))?.into_any().unbind());
+            }
+        }
+        let result: Vec<PyNode> = {
+            let heads = self.graph.bind(py).call_method1(
+                "heads",
+                (pyo3::types::PyList::new(
+                    py,
+                    key.iter().map(|n| n.0.clone_ref(py)),
+                )?,),
+            )?;
+            let mut out = Vec::new();
+            for item in heads.try_iter()? {
+                out.push(PyNode::from(item?));
+            }
+            out
+        };
+        let mut cache = self.cache.lock().unwrap();
+        cache.insert(key, result.clone());
+        let fs = py.import("builtins")?.getattr("frozenset")?;
+        let items: Vec<Py<PyAny>> = result.into_iter().map(|n| n.0).collect();
+        Ok(fs.call1((items,))?.into_any().unbind())
+    }
+
+    /// Store a precomputed `(keys, heads)` pair directly in the cache.
+    fn cache(&self, py: Python, keys: Py<PyAny>, heads: Py<PyAny>) -> PyResult<()> {
+        let key_nodes = extract_iter_pynodes(py, &keys)?;
+        let head_nodes = extract_iter_pynodes(py, &heads)?;
+        let key = sort_pynodes_by_hash(key_nodes);
+        self.cache.lock().unwrap().insert(key, head_nodes);
+        Ok(())
+    }
+}
+
+/// Python binding for [`CachingParentsProvider`]. Wraps an inner Python
+/// parents provider (any object with a `get_parent_map(keys)` method) and
+/// caches every lookup so repeated queries don't re-hit the inner provider.
+///
+/// Mirrors `vcsgraph.graph.CachingParentsProvider`.
+#[pyclass(name = "CachingParentsProvider")]
+struct PyCachingParentsProvider {
+    inner: RsCachingParentsProvider<PyNode, PyParentsProviderAdapter>,
+    real_provider_py: Py<PyAny>,
+}
+
+#[pymethods]
+impl PyCachingParentsProvider {
+    /// Construct a caching wrapper around `parent_provider`, which must be
+    /// either a Python object with a `get_parent_map` method or `None` when
+    /// `get_parent_map` is supplied as a callable.
+    #[new]
+    #[pyo3(signature = (parent_provider=None, get_parent_map=None))]
+    fn new(
+        py: Python,
+        parent_provider: Option<Py<PyAny>>,
+        get_parent_map: Option<Py<PyAny>>,
+    ) -> PyResult<Self> {
+        let provider_obj = match (parent_provider, get_parent_map) {
+            (Some(p), None) => p,
+            (None, Some(cb)) => {
+                // Wrap the callable into a tiny Python shim that exposes
+                // a `get_parent_map` attribute, so the adapter can call it
+                // uniformly.
+                let builtins = py.import("builtins")?;
+                let type_ = builtins.getattr("type")?;
+                let ns = pyo3::types::PyDict::new(py);
+                ns.set_item("get_parent_map", cb)?;
+                let shim = type_.call1(("_CPPShim", (builtins.getattr("object")?,), ns))?;
+                shim.call0()?.into_any().unbind()
+            }
+            (Some(_), Some(_)) => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "Pass parent_provider OR get_parent_map, not both",
+                ))
+            }
+            (None, None) => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "Either parent_provider or get_parent_map must be supplied",
+                ))
+            }
+        };
+        let adapter = PyParentsProviderAdapter {
+            provider: provider_obj.clone_ref(py),
+        };
+        Ok(PyCachingParentsProvider {
+            inner: RsCachingParentsProvider::new(adapter),
+            real_provider_py: provider_obj,
+        })
+    }
+
+    fn __repr__(&self, py: Python) -> PyResult<String> {
+        let r = self.real_provider_py.bind(py).repr()?;
+        Ok(format!("CachingParentsProvider({})", r))
+    }
+
+    #[pyo3(signature = (cache_misses=true))]
+    fn enable_cache(&self, cache_misses: bool) -> PyResult<()> {
+        self.inner
+            .enable_cache(cache_misses)
+            .map_err(pyo3::exceptions::PyAssertionError::new_err)
+    }
+
+    fn disable_cache(&self) {
+        self.inner.disable_cache();
+    }
+
+    /// Return a snapshot of the cache as a Python dict, or `None` if
+    /// disabled.
+    fn get_cached_map<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        match self.inner.get_cached_map() {
+            None => Ok(None),
+            Some(map) => Ok(Some(cache_map_to_pydict(py, map)?)),
+        }
+    }
+
+    /// Backward-compatible access to the raw `_cache` attribute. Returns a
+    /// dict snapshot when the cache is enabled, `None` otherwise. The
+    /// Python tests read this directly, so mirror Python's behaviour of
+    /// exposing an empty dict rather than `None` for a freshly-enabled
+    /// cache.
+    #[getter]
+    fn _cache<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        self.get_cached_map(py)
+    }
+
+    fn get_cached_parent_map<'py>(
+        &self,
+        py: Python<'py>,
+        keys: Py<PyAny>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let nodes = extract_iter_pynodes(py, &keys)?;
+        let hs: HashSet<PyNode> = nodes.into_iter().collect();
+        let pm = self.inner.get_cached_parent_map(&hs);
+        parent_map_to_pydict(py, pm)
+    }
+
+    fn get_parent_map<'py>(
+        &self,
+        py: Python<'py>,
+        keys: Py<PyAny>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let nodes = extract_iter_pynodes(py, &keys)?;
+        let hs: HashSet<PyNode> = nodes.into_iter().collect();
+        let pm = self.inner.get_parent_map(&hs);
+        parent_map_to_pydict(py, pm)
+    }
+
+    fn note_missing_key(&self, key: Py<PyAny>) {
+        self.inner.note_missing_key(PyNode::from(key));
+    }
+
+    #[getter]
+    fn missing_keys<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PySet>> {
+        pynodes_to_pyset(py, self.inner.missing_keys())
+    }
+}
+
 /// Adapter letting a Python parents provider satisfy Rust's `ParentsProvider`
 /// trait. Holds a raw `Py<PyAny>` and dispatches `get_parent_map(keys)` via
 /// the GIL.
@@ -825,6 +1397,25 @@ fn parent_map_to_pydict<'py>(
     Ok(d)
 }
 
+fn cache_map_to_pydict<'py>(
+    py: Python<'py>,
+    map: rustc_hash::FxHashMap<PyNode, Parents<PyNode>>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    for (k, v) in map {
+        match v {
+            Parents::Known(ps) => {
+                let list: Vec<Py<PyAny>> = ps.into_iter().map(|n| n.0).collect();
+                d.set_item(k.0, list)?;
+            }
+            Parents::Ghost => {
+                d.set_item(k.0, py.None())?;
+            }
+        }
+    }
+    Ok(d)
+}
+
 #[pymethods]
 impl PyGraph {
     #[new]
@@ -878,30 +1469,29 @@ impl PyGraph {
             })
     }
 
-    /// Iterate the left-hand ancestry from `start_key` until a key in
-    /// `stop_keys` is hit (or the origin is reached).
+    /// Return a lazy iterator over the lefthand ancestry of `start_key`.
+    ///
+    /// The iterator yields revisions one at a time, walking left-most
+    /// parents, and raises RevisionNotPresent if a key in the walk is
+    /// missing from the provider. `stop_keys` is any container supporting
+    /// the `in` operator; iteration stops when the current key is in it.
     #[pyo3(signature = (start_key, stop_keys=None))]
     fn iter_lefthand_ancestry(
-        &self,
+        slf: PyRef<'_, Self>,
         py: Python,
         start_key: Py<PyAny>,
         stop_keys: Option<Py<PyAny>>,
-    ) -> PyResult<Vec<Py<PyAny>>> {
-        let start = PyNode::from(start_key);
-        let stop: Vec<PyNode> = match stop_keys {
-            None => Vec::new(),
-            Some(obj) => {
-                let mut s = Vec::new();
-                for item in obj.bind(py).try_iter()? {
-                    s.push(PyNode::from(item?));
-                }
-                s
-            }
+    ) -> PyResult<PyLefthandAncestryIterator> {
+        let stop_keys = match stop_keys {
+            Some(s) => s,
+            None => pyo3::types::PyTuple::empty(py).into_any().unbind(),
         };
-        self.inner
-            .iter_lefthand_ancestry(start, stop)
-            .map(|v| v.into_iter().map(|n| n.0).collect())
-            .map_err(graph_error_to_py)
+        Ok(PyLefthandAncestryIterator {
+            provider: slf.provider_py.clone_ref(py),
+            next_key: Some(start_key),
+            stop_keys,
+            graph_py: slf.into_pyobject(py)?.into_any().unbind(),
+        })
     }
 
     /// Iterate ancestry, yielding `(key, parents_list_or_None)` pairs.
@@ -1236,6 +1826,52 @@ impl PyGraph {
         pynodes_to_pyset(py, result)
     }
 
+    /// Remove revisions which are children of other ones in the set.
+    ///
+    /// This doesn't do any graph searching, it just checks the immediate
+    /// parent_map to find if there are any children which can be removed.
+    ///
+    /// :param revisions: A set of revision_ids
+    /// :param parent_map: A mapping `{key: parents}` — the value may be
+    ///     a list, tuple, or None (for ghosts).
+    /// :return: A set of revision_ids with the children removed
+    fn _remove_simple_descendants<'py>(
+        &self,
+        py: Python<'py>,
+        revisions: Py<PyAny>,
+        parent_map: Py<PyAny>,
+    ) -> PyResult<Bound<'py, pyo3::types::PySet>> {
+        let revs: std::collections::HashSet<PyNode> = {
+            let mut s = std::collections::HashSet::new();
+            for item in revisions.bind(py).try_iter()? {
+                s.insert(PyNode::from(item?));
+            }
+            s
+        };
+        // Walk parent_map.items() Python-side so we accept any dict-like
+        // mapping, tuples or lists as the value.
+        let items = parent_map.bind(py).call_method0("items")?;
+        let mut simple = revs.clone();
+        for item in items.try_iter()? {
+            let item = item?;
+            let key: Py<PyAny> = item.get_item(0)?.unbind();
+            let parents = item.get_item(1)?;
+            if parents.is_none() {
+                continue;
+            }
+            for parent in parents.try_iter()? {
+                let parent = parent?;
+                let parent_node = PyNode::from(parent.unbind());
+                if revs.contains(&parent_node) {
+                    simple.remove(&PyNode::from(key.clone_ref(py)));
+                    break;
+                }
+            }
+        }
+        let items: Vec<Py<PyAny>> = simple.into_iter().map(|n| n.0).collect();
+        pyo3::types::PySet::new(py, items)
+    }
+
     /// Find ancestors of `new_key` that may be descendants of `old_key`.
     fn _find_descendant_ancestors<'py>(
         &self,
@@ -1465,7 +2101,6 @@ impl PyBFSearcher {
 fn _graph_rs(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(invert_parent_map))?;
     m.add_wrapped(wrap_pyfunction!(collapse_linear_regions))?;
-    m.add_wrapped(wrap_pyfunction!(DictParentsProvider))?;
     m.add_wrapped(wrap_pyfunction!(merge_sort))?;
     m.add_class::<TopoSorter>()?;
     m.add_class::<MergeSorter>()?;
@@ -1475,5 +2110,13 @@ fn _graph_rs(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_class::<PyKnownGraphNodesView>()?;
     m.add_class::<PyGraph>()?;
     m.add_class::<PyBFSearcher>()?;
+    m.add_class::<PyCachingParentsProvider>()?;
+    m.add_class::<PyHeadsCache>()?;
+    m.add_class::<PyFrozenHeadsCache>()?;
+    m.add_class::<PyGraphThunkIdsToKeys>()?;
+    m.add_class::<PyLefthandAncestryIterator>()?;
+    m.add_class::<PyDictParentsProvider>()?;
+    m.add_class::<PyStackedParentsProvider>()?;
+    m.add_class::<PyCallableToParentsProviderAdapter>()?;
     Ok(())
 }

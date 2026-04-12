@@ -16,16 +16,32 @@
 
 """Graph algorithms for version control systems."""
 
-__all__ = ["collapse_linear_regions", "invert_parent_map"]
+__all__ = [
+    "CachingParentsProvider",
+    "CallableToParentsProviderAdapter",
+    "DictParentsProvider",
+    "FrozenHeadsCache",
+    "GraphThunkIdsToKeys",
+    "HeadsCache",
+    "StackedParentsProvider",
+    "collapse_linear_regions",
+    "invert_parent_map",
+]
 
-from . import errors
 from ._graph_rs import (
-    _BreadthFirstSearcher as _RustBreadthFirstSearcher,
-)
-from ._graph_rs import (
+    CachingParentsProvider,
+    CallableToParentsProviderAdapter,
+    DictParentsProvider,
+    FrozenHeadsCache,
+    GraphThunkIdsToKeys,
+    HeadsCache,
+    StackedParentsProvider,
     _RustGraph,
     collapse_linear_regions,
     invert_parent_map,
+)
+from ._graph_rs import (
+    _BreadthFirstSearcher as _RustBreadthFirstSearcher,
 )
 
 # NULL_REVISION constant
@@ -52,188 +68,6 @@ NULL_REVISION = b"null:"
 # The find_unique_lca algorithm will pick A in two steps:
 # 1. find_lca('G', 'H') => ['D', 'E']
 # 2. Since len(['D', 'E']) > 1, find_lca('D', 'E') => ['A']
-
-
-class DictParentsProvider:
-    """A parents provider for Graph objects."""
-
-    def __init__(self, ancestry):
-        self.ancestry = ancestry
-
-    def __repr__(self):
-        return f"DictParentsProvider({self.ancestry!r})"
-
-    # Note: DictParentsProvider does not implement get_cached_parent_map
-    #       Arguably, the data is clearly cached in memory. However, this class
-    #       is mostly used for testing, and it keeps the tests clean to not
-    #       change it.
-
-    def get_parent_map(self, keys):
-        """See StackedParentsProvider.get_parent_map."""
-        ancestry = self.ancestry
-        return {k: tuple(ancestry[k]) for k in keys if k in ancestry}
-
-
-class StackedParentsProvider:
-    """A parents provider which stacks (or unions) multiple providers.
-
-    The providers are queries in the order of the provided parent_providers.
-    """
-
-    def __init__(self, parent_providers):
-        self._parent_providers = parent_providers
-
-    def __repr__(self):
-        return f"{self.__class__.__name__}({self._parent_providers!r})"
-
-    def get_parent_map(self, keys):
-        """Get a mapping of keys => parents.
-
-        A dictionary is returned with an entry for each key present in this
-        source. If this source doesn't have information about a key, it should
-        not include an entry.
-
-        [NULL_REVISION] is used as the parent of the first user-committed
-        revision.  Its parent list is empty.
-
-        :param keys: An iterable returning keys to check (eg revision_ids)
-        :return: A dictionary mapping each key to its parents
-        """
-        found = {}
-        remaining = set(keys)
-        # This adds getattr() overhead to each get_parent_map call. However,
-        # this is StackedParentsProvider, which means we're dealing with I/O
-        # (either local indexes, or remote RPCs), so CPU overhead should be
-        # minimal.
-        for parents_provider in self._parent_providers:
-            get_cached = getattr(parents_provider, "get_cached_parent_map", None)
-            if get_cached is None:
-                continue
-            new_found = get_cached(remaining)
-            found.update(new_found)
-            remaining.difference_update(new_found)
-            if not remaining:
-                break
-        if not remaining:
-            return found
-        for parents_provider in self._parent_providers:
-            try:
-                new_found = parents_provider.get_parent_map(remaining)
-            except errors.UnsupportedOperation:
-                continue
-            found.update(new_found)
-            remaining.difference_update(new_found)
-            if not remaining:
-                break
-        return found
-
-
-class CachingParentsProvider:
-    """A parents provider which will cache the revision => parents as a dict.
-
-    This is useful for providers which have an expensive look up.
-
-    Either a ParentsProvider or a get_parent_map-like callback may be
-    supplied.  If it provides extra un-asked-for parents, they will be cached,
-    but filtered out of get_parent_map.
-
-    The cache is enabled by default, but may be disabled and re-enabled.
-    """
-
-    def __init__(self, parent_provider=None, get_parent_map=None):
-        """Constructor.
-
-        :param parent_provider: The ParentProvider to use.  It or
-            get_parent_map must be supplied.
-        :param get_parent_map: The get_parent_map callback to use.  It or
-            parent_provider must be supplied.
-        """
-        self._real_provider = parent_provider
-        if get_parent_map is None:
-            self._get_parent_map = self._real_provider.get_parent_map
-        else:
-            self._get_parent_map = get_parent_map
-        self._cache = None
-        self.enable_cache(True)
-
-    def __repr__(self):
-        return f"{self.__class__.__name__}({self._real_provider!r})"
-
-    def enable_cache(self, cache_misses=True):
-        """Enable cache."""
-        if self._cache is not None:
-            raise AssertionError("Cache enabled when already enabled.")
-        self._cache = {}
-        self._cache_misses = cache_misses
-        self.missing_keys = set()
-
-    def disable_cache(self):
-        """Disable and clear the cache."""
-        self._cache = None
-        self._cache_misses = None
-        self.missing_keys = set()
-
-    def get_cached_map(self):
-        """Return any cached get_parent_map values."""
-        if self._cache is None:
-            return None
-        return dict(self._cache)
-
-    def get_cached_parent_map(self, keys):
-        """Return items from the cache.
-
-        This returns the same info as get_parent_map, but explicitly does not
-        invoke the supplied ParentsProvider to search for uncached values.
-        """
-        cache = self._cache
-        if cache is None:
-            return {}
-        return {key: cache[key] for key in keys if key in cache}
-
-    def get_parent_map(self, keys):
-        """See StackedParentsProvider.get_parent_map."""
-        cache = self._cache
-        if cache is None:
-            cache = self._get_parent_map(keys)
-        else:
-            needed_revisions = {key for key in keys if key not in cache}
-            # Do not ask for negatively cached keys
-            needed_revisions.difference_update(self.missing_keys)
-            if needed_revisions:
-                parent_map = self._get_parent_map(needed_revisions)
-                cache.update(parent_map)
-                if self._cache_misses:
-                    for key in needed_revisions:
-                        if key not in parent_map:
-                            self.note_missing_key(key)
-        result = {}
-        for key in keys:
-            value = cache.get(key)
-            if value is not None:
-                result[key] = value
-        return result
-
-    def note_missing_key(self, key):
-        """Note that key is a missing key."""
-        if self._cache_misses:
-            self.missing_keys.add(key)
-
-
-class CallableToParentsProviderAdapter:
-    """A parents provider that adapts any callable to the parents provider API.
-
-    i.e. it accepts calls to self.get_parent_map and relays them to the
-    callable it was constructed with.
-    """
-
-    def __init__(self, a_callable):
-        self.callable = a_callable
-
-    def __repr__(self):
-        return f"{self.__class__.__name__}({self.callable!r})"
-
-    def get_parent_map(self, keys):
-        return self.callable(keys)
 
 
 class Graph:
@@ -324,15 +158,7 @@ class Graph:
         :param revisions: A set of revision_ids
         :return: A set of revision_ids with the children removed
         """
-        simple_ancestors = set(revisions)
-        for revision, parent_ids in parent_map.items():
-            if parent_ids is None:
-                continue
-            for parent_id in parent_ids:
-                if parent_id in revisions:
-                    simple_ancestors.discard(revision)
-                    break
-        return simple_ancestors
+        return self._rs._remove_simple_descendants(revisions, parent_map)
 
     def get_child_map(self, keys):
         """Get a mapping from parents to children of the specified keys.
@@ -471,25 +297,14 @@ class Graph:
         yield from self._rs.iter_ancestry(revision_ids)
 
     def iter_lefthand_ancestry(self, start_key, stop_keys=None):
-        if stop_keys is None:
-            stop_keys = ()
-        next_key = start_key
+        """Iterate the lefthand ancestry of start_key.
 
-        def get_parents(key):
-            try:
-                return self._parents_provider.get_parent_map([key])[key]
-            except KeyError as err:
-                raise errors.RevisionNotPresent(next_key, self) from err
-
-        while True:
-            if next_key in stop_keys:
-                return
-            parents = get_parents(next_key)
-            yield next_key
-            if len(parents) == 0:
-                return
-            else:
-                next_key = parents[0]
+        Yields revisions in lefthand order. Callers may break early; the
+        walk is lazy and does not query further than the last yielded key.
+        Raises RevisionNotPresent if the walk reaches a key that is not in
+        the parents provider.
+        """
+        return self._rs.iter_lefthand_ancestry(start_key, stop_keys)
 
     def iter_topo_order(self, revisions):
         """Iterate through the input revisions in topological order.
@@ -516,89 +331,6 @@ class Graph:
         lower_bound_revid <= revid <= upper_bound_revid
         """
         return self._rs.is_between(revid, lower_bound_revid, upper_bound_revid)
-
-
-class HeadsCache:
-    """A cache of results for graph heads calls."""
-
-    def __init__(self, graph):
-        self.graph = graph
-        self._heads = {}
-
-    def heads(self, keys):
-        """Return the heads of keys.
-
-        This matches the API of Graph.heads(), specifically the return value is
-        a set which can be mutated, and ordering of the input is not preserved
-        in the output.
-
-        :see also: Graph.heads.
-        :param keys: The keys to calculate heads for.
-        :return: A set containing the heads, which may be mutated without
-            affecting future lookups.
-        """
-        keys = frozenset(keys)
-        try:
-            return set(self._heads[keys])
-        except KeyError:
-            heads = self.graph.heads(keys)
-            self._heads[keys] = heads
-            return set(heads)
-
-
-class FrozenHeadsCache:
-    """Cache heads() calls, assuming the caller won't modify them."""
-
-    def __init__(self, graph):
-        self.graph = graph
-        self._heads = {}
-
-    def heads(self, keys):
-        """Return the heads of keys.
-
-        Similar to Graph.heads(). The main difference is that the return value
-        is a frozen set which cannot be mutated.
-
-        :see also: Graph.heads.
-        :param keys: The keys to calculate heads for.
-        :return: A frozenset containing the heads.
-        """
-        keys = frozenset(keys)
-        try:
-            return self._heads[keys]
-        except KeyError:
-            heads = frozenset(self.graph.heads(keys))
-            self._heads[keys] = heads
-            return heads
-
-    def cache(self, keys, heads):
-        """Store a known value."""
-        self._heads[frozenset(keys)] = frozenset(heads)
-
-
-class GraphThunkIdsToKeys:
-    """Forwards calls about 'ids' to be about keys internally."""
-
-    def __init__(self, graph):
-        self._graph = graph
-
-    def topo_sort(self):
-        return [r for (r,) in self._graph.topo_sort()]
-
-    def heads(self, ids):
-        """See Graph.heads()."""
-        as_keys = [(i,) for i in ids]
-        head_keys = self._graph.heads(as_keys)
-        return {h[0] for h in head_keys}
-
-    def merge_sort(self, tip_revision):
-        nodes = self._graph.merge_sort((tip_revision,))
-        for node in nodes:
-            node.key = node.key[0]
-        return nodes
-
-    def add_node(self, revision, parents):
-        self._graph.add_node((revision,), [(p,) for p in parents])
 
 
 _counters = [0, 0, 0, 0, 0, 0, 0]
