@@ -4,8 +4,9 @@
 
 use crate::tsort::MergeSorter;
 use crate::{Error, RevnoVec};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::hash::Hash;
 
 /// A key that may either be a real node or the synthetic "origin" sentinel
@@ -71,8 +72,8 @@ pub struct MergeSortNode<K> {
 /// topological orderings.
 #[derive(Debug, Clone)]
 pub struct KnownGraph<K: Hash + Eq + Clone> {
-    nodes: HashMap<K, KnownGraphNode<K>>,
-    known_heads: HashMap<Vec<K>, HashSet<K>>,
+    nodes: FxHashMap<K, KnownGraphNode<K>>,
+    known_heads: FxHashMap<Vec<K>, FxHashSet<K>>,
     do_cache: bool,
 }
 
@@ -83,8 +84,8 @@ impl<K: Hash + Eq + Clone> KnownGraph<K> {
         I: IntoIterator<Item = (K, Vec<K>)>,
     {
         let mut g = KnownGraph {
-            nodes: HashMap::new(),
-            known_heads: HashMap::new(),
+            nodes: FxHashMap::default(),
+            known_heads: FxHashMap::default(),
             do_cache,
         };
         g.initialize_nodes(parent_map);
@@ -142,7 +143,7 @@ impl<K: Hash + Eq + Clone> KnownGraph<K> {
     }
 
     fn find_gdfo(&mut self) {
-        let mut known_parent_gdfos: HashMap<K, usize> = HashMap::new();
+        let mut known_parent_gdfos: FxHashMap<K, usize> = FxHashMap::default();
         let mut pending: Vec<K> = Vec::new();
 
         for key in self.find_tails() {
@@ -283,11 +284,11 @@ impl<K: Hash + Eq + Clone> KnownGraph<K> {
     /// wrapping `K` in [`Key<K>`] and calling [`heads_with_origin`].
     ///
     /// All keys in `candidates` must be present in the graph (not ghosts).
-    pub fn heads<I>(&mut self, candidates: I) -> HashSet<K>
+    pub fn heads<I>(&mut self, candidates: I) -> FxHashSet<K>
     where
         I: IntoIterator<Item = K>,
     {
-        let candidates: HashSet<K> = candidates.into_iter().collect();
+        let candidates: FxHashSet<K> = candidates.into_iter().collect();
         if candidates.len() < 2 {
             return candidates;
         }
@@ -303,7 +304,7 @@ impl<K: Hash + Eq + Clone> KnownGraph<K> {
             return cached.clone();
         }
 
-        let mut seen: HashSet<K> = HashSet::new();
+        let mut seen: FxHashSet<K> = FxHashSet::default();
         let mut pending: Vec<K> = Vec::new();
         let mut min_gdfo: Option<u64> = None;
         for key in &candidates {
@@ -328,7 +329,7 @@ impl<K: Hash + Eq + Clone> KnownGraph<K> {
                 pending.extend(parents.iter().cloned());
             }
         }
-        let heads: HashSet<K> = candidates.difference(&seen).cloned().collect();
+        let heads: FxHashSet<K> = candidates.difference(&seen).cloned().collect();
         if self.do_cache {
             self.known_heads.insert(heads_cache_key, heads.clone());
         }
@@ -350,7 +351,7 @@ impl<K: Hash + Eq + Clone> KnownGraph<K> {
             return Err(Error::Cycle(unreachable));
         }
         let mut pending = self.find_tails();
-        let mut num_seen_parents: HashMap<K, usize> =
+        let mut num_seen_parents: FxHashMap<K, usize> =
             self.nodes.keys().map(|k| (k.clone(), 0)).collect();
         let mut topo_order: Vec<K> = Vec::new();
         while let Some(node_key) = pending.pop() {
@@ -386,11 +387,11 @@ impl<K: Hash + Eq + Clone> KnownGraph<K> {
         P: FnMut(&K) -> PFX,
         PFX: Ord + Hash,
     {
-        let mut prefix_tips: HashMap<PFX, Vec<K>> = HashMap::new();
+        let mut prefix_tips: FxHashMap<PFX, Vec<K>> = FxHashMap::default();
         for key in self.find_tips() {
             prefix_tips.entry(prefix_of(&key)).or_default().push(key);
         }
-        let mut num_seen_children: HashMap<K, usize> =
+        let mut num_seen_children: FxHashMap<K, usize> =
             self.nodes.keys().map(|k| (k.clone(), 0)).collect();
 
         let mut prefix_list: Vec<(PFX, Vec<K>)> = prefix_tips.into_iter().collect();
@@ -451,15 +452,15 @@ impl<K: Hash + Eq + Clone + std::fmt::Debug> KnownGraph<K> {
 impl<K: Hash + Eq + Clone> KnownGraph<Key<K>> {
     /// `heads()` variant that implements the Python `NULL_REVISION` filter:
     /// [`Key::Origin`] is only a head if it is the sole candidate.
-    pub fn heads_with_origin<I>(&mut self, candidates: I) -> HashSet<Key<K>>
+    pub fn heads_with_origin<I>(&mut self, candidates: I) -> FxHashSet<Key<K>>
     where
         I: IntoIterator<Item = Key<K>>,
     {
-        let mut candidates: HashSet<Key<K>> = candidates.into_iter().collect();
+        let mut candidates: FxHashSet<Key<K>> = candidates.into_iter().collect();
         if candidates.contains(&Key::Origin) {
             candidates.remove(&Key::Origin);
             if candidates.is_empty() {
-                let mut r = HashSet::new();
+                let mut r = FxHashSet::default();
                 r.insert(Key::Origin);
                 return r;
             }
@@ -504,7 +505,7 @@ mod tests {
     fn heads_trivial() {
         let mut g = make(&[("a", &[]), ("b", &["a"])]);
         let h = g.heads(vec!["a", "b"]);
-        let expected: HashSet<_> = ["b"].iter().copied().collect();
+        let expected: FxHashSet<_> = ["b"].iter().copied().collect();
         assert_eq!(h, expected);
     }
 
@@ -512,10 +513,10 @@ mod tests {
     fn heads_diamond() {
         let mut g = make(&[("a", &[]), ("b", &["a"]), ("c", &["a"]), ("d", &["b", "c"])]);
         let h = g.heads(vec!["b", "c"]);
-        let expected: HashSet<_> = ["b", "c"].iter().copied().collect();
+        let expected: FxHashSet<_> = ["b", "c"].iter().copied().collect();
         assert_eq!(h, expected);
         let h2 = g.heads(vec!["a", "d"]);
-        let expected2: HashSet<_> = ["d"].iter().copied().collect();
+        let expected2: FxHashSet<_> = ["d"].iter().copied().collect();
         assert_eq!(h2, expected2);
     }
 
@@ -533,7 +534,7 @@ mod tests {
         let mut g: KnownGraph<Key<&'static str>> =
             KnownGraph::new(vec![(Key::Node("a"), vec![Key::Origin])], true);
         let h = g.heads_with_origin(vec![Key::Origin, Key::Node("a")]);
-        let expected: HashSet<_> = [Key::Node("a")].iter().cloned().collect();
+        let expected: FxHashSet<_> = [Key::Node("a")].iter().cloned().collect();
         assert_eq!(h, expected);
     }
 

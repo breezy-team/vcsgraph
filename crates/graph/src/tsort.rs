@@ -1,13 +1,14 @@
 #![allow(clippy::if_same_then_else)]
 use crate::{Error, RevnoVec};
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::HashMap;
 use std::hash::Hash;
 
 #[derive(Debug)]
 pub struct TopoSorter<K: Eq + Hash> {
-    graph: HashMap<K, Vec<K>>,
+    graph: FxHashMap<K, Vec<K>>,
 
-    visitable: HashSet<K>,
+    visitable: FxHashSet<K>,
 
     // this is a stack storing the depth first search into the graph.
     pending_node_stack: Vec<K>,
@@ -20,14 +21,14 @@ pub struct TopoSorter<K: Eq + Hash> {
     // this is a set of the completed nodes for fast checking whether a
     // parent in a node we are processing on the stack has already been
     // emitted and thus can be skipped.
-    completed_node_names: HashSet<K>,
+    completed_node_names: FxHashSet<K>,
 }
 
 impl<K: Eq + Hash + std::fmt::Debug + Clone> TopoSorter<K> {
     /// Create a new `TopoSorter` from a graph represented as a sequence of pairs
     /// of node_name->parent_names_list.
     pub fn new(graph: impl Iterator<Item = (K, Vec<K>)>) -> TopoSorter<K> {
-        let mut g = HashMap::new();
+        let mut g = FxHashMap::default();
         for (node, parents) in graph {
             g.insert(node, parents);
         }
@@ -37,7 +38,7 @@ impl<K: Eq + Hash + std::fmt::Debug + Clone> TopoSorter<K> {
             visitable,
             pending_node_stack: vec![],
             pending_parents_stack: vec![],
-            completed_node_names: HashSet::new(),
+            completed_node_names: FxHashSet::default(),
         }
     }
 
@@ -268,12 +269,12 @@ pub struct MergeSorter<K> {
     graph: HashMap<K, Vec<K>>,
     stop_revision: Option<K>,
     original_graph: HashMap<K, Vec<K>>,
-    revnos: HashMap<K, (Option<RevnoVec>, bool)>,
+    revnos: FxHashMap<K, (Option<RevnoVec>, bool)>,
     // Each mainline revision counts how many child branches have spawned from it.
-    revno_to_branch_count: HashMap<usize, usize>,
+    revno_to_branch_count: FxHashMap<usize, usize>,
     // this is a set of the nodes who have been completely analysed for fast
     // membership checking
-    completed_node_names: HashSet<K>,
+    completed_node_names: FxHashSet<K>,
     // this is the scheduling of nodes list.
     // Nodes are scheduled
     // from the bottom left of the tree: in the tree
@@ -352,7 +353,7 @@ impl<K: Eq + Hash + Clone + std::fmt::Debug> MergeSorter<K> {
         let revnos = graph
             .keys()
             .map(|revision| (revision.clone(), (None, true)))
-            .collect::<HashMap<K, (Option<RevnoVec>, bool)>>();
+            .collect::<FxHashMap<K, (Option<RevnoVec>, bool)>>();
 
         let mut sorter = MergeSorter {
             generate_revno,
@@ -360,12 +361,12 @@ impl<K: Eq + Hash + Clone + std::fmt::Debug> MergeSorter<K> {
             stop_revision,
             original_graph,
             revnos,
-            revno_to_branch_count: HashMap::new(),
+            revno_to_branch_count: FxHashMap::default(),
             node_name_stack: Vec::new(),
             node_merge_depth_stack: Vec::new(),
             pending_parents_stack: Vec::new(),
             first_child_stack: Vec::new(),
-            completed_node_names: HashSet::new(),
+            completed_node_names: FxHashSet::default(),
             scheduled_nodes: Vec::new(),
             left_subtree_pushed_stack: Vec::new(),
             sequence_number: 0,
