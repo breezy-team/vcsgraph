@@ -1102,7 +1102,7 @@ where
                         .map(|s| s.find_seen_ancestors([ancestor.clone()], &self.provider))
                         .collect();
                     for (searcher, seen_anc) in
-                        searchers.values_mut().zip(seen_per_searcher.into_iter())
+                        searchers.values_mut().zip(seen_per_searcher)
                     {
                         searcher.stop_searching_any(seen_anc);
                     }
