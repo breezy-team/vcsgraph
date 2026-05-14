@@ -1951,6 +1951,33 @@ impl PyBFSearcher {
         self.state.iterations()
     }
 
+    /// `_current_present` attribute — revisions present in the most recent
+    /// advance. Mirrors the Python API; empty before the first advance.
+    #[getter]
+    fn _current_present<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PySet>> {
+        pynodes_to_pyset(py, self.state.current_present().clone())
+    }
+
+    /// `_current_ghosts` attribute — ghost revisions encountered in the most
+    /// recent advance. Mirrors the Python API; empty before the first advance.
+    #[getter]
+    fn _current_ghosts<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PySet>> {
+        pynodes_to_pyset(py, self.state.current_ghosts().clone())
+    }
+
+    /// `_current_parents` attribute — parent map of present revisions from
+    /// the most recent advance. Mirrors the Python API; empty before the
+    /// first advance.
+    #[getter]
+    fn _current_parents<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        for (rev, parents) in self.state.current_parents() {
+            let tup = pyo3::types::PyTuple::new(py, parents.iter().map(|n| n.0.clone_ref(py)))?;
+            d.set_item(rev.0.clone_ref(py), tup)?;
+        }
+        Ok(d)
+    }
+
     /// Python `step` returns the next query set, or `()` on StopIteration.
     fn step<'py>(&mut self, py: Python<'py>) -> PyResult<Py<PyAny>> {
         match self.state.next_set(&self.adapter) {
