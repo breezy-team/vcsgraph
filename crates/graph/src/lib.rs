@@ -93,7 +93,7 @@ impl<'py, K: pyo3::IntoPyObject<'py> + Clone + PartialEq + Eq> pyo3::IntoPyObjec
     fn into_pyobject(self, py: pyo3::Python<'py>) -> Result<Self::Output, Self::Error> {
         match self {
             Parents::Ghost => Ok(py.None().into_pyobject(py)?),
-            Parents::Known(v) => Ok(v.into_pyobject(py)?.into_any()),
+            Parents::Known(v) => Ok(pyo3::types::PyTuple::new(py, v)?.into_any()),
         }
     }
 }

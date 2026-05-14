@@ -174,7 +174,7 @@ fn collapse_linear_regions(parent_map: ParentMap<PyNode>) -> PyResult<ParentMap<
 /// A parents provider for Graph objects, backed by a dict.
 ///
 /// Mirrors `vcsgraph.graph.DictParentsProvider`: takes a mapping of
-/// `{key: parents_list}` and serves `get_parent_map` lookups from it.
+/// `{key: parents_tuple}` and serves `get_parent_map` lookups from it.
 #[pyclass(name = "DictParentsProvider", dict)]
 struct PyDictParentsProvider {
     inner: vcs_graph::DictParentsProvider<PyNode>,
@@ -1331,7 +1331,7 @@ impl PyCachingParentsProvider {
 /// the GIL.
 ///
 /// The Python provider's `get_parent_map` must accept an iterable of keys
-/// and return a dict-like `{key: parents_list}` (missing keys are treated
+/// and return a dict-like `{key: parents_tuple}` (missing keys are treated
 /// as ghosts). Any Python exception during the call is caught and converted
 /// to an empty response — matching the Python Graph's behavior of treating
 /// the provider as best-effort.
@@ -1384,15 +1384,7 @@ fn parent_map_to_pydict<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     for (k, v) in pm {
-        match v {
-            Parents::Known(ps) => {
-                let list: Vec<Py<PyAny>> = ps.into_iter().map(|n| n.0).collect();
-                d.set_item(k.0, list)?;
-            }
-            Parents::Ghost => {
-                d.set_item(k.0, py.None())?;
-            }
-        }
+        d.set_item(k.0, v.into_pyobject(py)?)?;
     }
     Ok(d)
 }
@@ -1403,15 +1395,7 @@ fn cache_map_to_pydict<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     for (k, v) in map {
-        match v {
-            Parents::Known(ps) => {
-                let list: Vec<Py<PyAny>> = ps.into_iter().map(|n| n.0).collect();
-                d.set_item(k.0, list)?;
-            }
-            Parents::Ghost => {
-                d.set_item(k.0, py.None())?;
-            }
-        }
+        d.set_item(k.0, v.into_pyobject(py)?)?;
     }
     Ok(d)
 }
@@ -1494,7 +1478,7 @@ impl PyGraph {
         })
     }
 
-    /// Iterate ancestry, yielding `(key, parents_list_or_None)` pairs.
+    /// Iterate ancestry, yielding `(key, parents_tuple_or_None)` pairs.
     fn iter_ancestry<'py>(
         &self,
         py: Python<'py>,
