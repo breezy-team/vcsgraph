@@ -1946,3 +1946,14 @@ class TestStackedParentsProvider(TestCase):
             ],
             self.calls,
         )
+
+    def test_iterable_is_reiterated_each_call(self):
+        # The iterable passed to StackedParentsProvider is re-iterated on
+        # every get_parent_map call, so callers may mutate the underlying
+        # sequence after construction (e.g. breezy's _LazyListJoin of
+        # fallback repos).
+        providers: list = []
+        stacked = _mod_graph.StackedParentsProvider(providers)
+        self.assertEqual({}, stacked.get_parent_map([b"rev1"]))
+        providers.append(_mod_graph.DictParentsProvider({b"rev1": [b"rev0"]}))
+        self.assertEqual({b"rev1": (b"rev0",)}, stacked.get_parent_map([b"rev1"]))

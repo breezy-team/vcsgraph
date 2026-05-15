@@ -256,28 +256,35 @@ impl ParentsProvider<PyNode> for PyDictParentsProvider {
 /// If a child exposes `get_cached_parent_map`, that fast path is queried
 /// first for all children before any full `get_parent_map` call — just
 /// like the Python version.
+///
+/// The `parent_providers` iterable is re-iterated on every `get_parent_map`
+/// call, so callers (notably breezy's `_LazyListJoin` of fallback repos)
+/// that mutate the underlying sequence after construction see their
+/// changes reflected.
 #[pyclass(name = "StackedParentsProvider")]
 struct PyStackedParentsProvider {
-    parent_providers: Vec<Py<PyAny>>,
+    parent_providers: Py<PyAny>,
+}
+
+impl PyStackedParentsProvider {
+    fn current_providers(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        let mut providers = Vec::new();
+        for p in self.parent_providers.bind(py).try_iter()? {
+            providers.push(p?.unbind());
+        }
+        Ok(providers)
+    }
 }
 
 #[pymethods]
 impl PyStackedParentsProvider {
     #[new]
-    fn new(py: Python, parent_providers: Py<PyAny>) -> PyResult<Self> {
-        let mut providers = Vec::new();
-        for p in parent_providers.bind(py).try_iter()? {
-            providers.push(p?.unbind());
-        }
-        Ok(PyStackedParentsProvider {
-            parent_providers: providers,
-        })
+    fn new(parent_providers: Py<PyAny>) -> Self {
+        PyStackedParentsProvider { parent_providers }
     }
 
     fn __repr__(&self, py: Python) -> PyResult<String> {
-        let list =
-            pyo3::types::PyList::new(py, self.parent_providers.iter().map(|p| p.clone_ref(py)))?;
-        let r = list.repr()?;
+        let r = self.parent_providers.bind(py).repr()?;
         Ok(format!("StackedParentsProvider({})", r))
     }
 
@@ -292,9 +299,11 @@ impl PyStackedParentsProvider {
             remaining.add(k?.unbind())?;
         }
 
+        let providers = self.current_providers(py)?;
+
         // First pass: any provider that implements get_cached_parent_map
         // gets queried cheaply before we hit the slow path.
-        for pp in &self.parent_providers {
+        for pp in &providers {
             if remaining.is_empty() {
                 break;
             }
@@ -318,7 +327,7 @@ impl PyStackedParentsProvider {
         }
 
         // Second pass: full get_parent_map calls, in order.
-        for pp in &self.parent_providers {
+        for pp in &providers {
             if remaining.is_empty() {
                 break;
             }
