@@ -175,34 +175,50 @@ fn collapse_linear_regions(parent_map: ParentMap<PyNode>) -> PyResult<ParentMap<
 ///
 /// Mirrors `vcsgraph.graph.DictParentsProvider`: takes a mapping of
 /// `{key: parents_tuple}` and serves `get_parent_map` lookups from it.
+/// The dict is consulted on every call so mutations after construction
+/// are visible — matching the original Python implementation.
 #[pyclass(name = "DictParentsProvider", dict)]
 struct PyDictParentsProvider {
-    inner: vcs_graph::DictParentsProvider<PyNode>,
     ancestry: Py<PyAny>,
+}
+
+impl PyDictParentsProvider {
+    fn lookup(&self, py: Python<'_>, keys: &HashSet<PyNode>) -> ParentMap<PyNode> {
+        let ancestry = self.ancestry.bind(py);
+        let mut pm = ParentMap::new();
+        for k in keys {
+            let key_obj = k.0.bind(py);
+            let v_obj = match ancestry.get_item(key_obj) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let Ok(iter) = v_obj.try_iter() else {
+                continue;
+            };
+            let mut parents: Vec<PyNode> = Vec::new();
+            let mut ok = true;
+            for p in iter {
+                match p {
+                    Ok(p) => parents.push(PyNode::from(p.unbind())),
+                    Err(_) => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok {
+                pm.insert(k.clone(), Parents::Known(parents));
+            }
+        }
+        pm
+    }
 }
 
 #[pymethods]
 impl PyDictParentsProvider {
     #[new]
-    fn new(py: Python, ancestry: Py<PyAny>) -> PyResult<Self> {
-        // Extract the mapping into a ParentMap. We accept any dict-like
-        // object by calling `.items()`.
-        let items = ancestry.bind(py).call_method0("items")?;
-        let mut pm = ParentMap::new();
-        for item in items.try_iter()? {
-            let item = item?;
-            let k: Py<PyAny> = item.get_item(0)?.unbind();
-            let v_obj = item.get_item(1)?;
-            let mut parents: Vec<PyNode> = Vec::new();
-            for p in v_obj.try_iter()? {
-                parents.push(PyNode::from(p?.unbind()));
-            }
-            pm.insert(PyNode::from(k), Parents::Known(parents));
-        }
-        Ok(PyDictParentsProvider {
-            inner: vcs_graph::DictParentsProvider::<PyNode>::new(pm),
-            ancestry,
-        })
+    fn new(ancestry: Py<PyAny>) -> PyResult<Self> {
+        Ok(PyDictParentsProvider { ancestry })
     }
 
     /// The underlying mapping, preserved as the original Python object.
@@ -223,14 +239,14 @@ impl PyDictParentsProvider {
     ) -> PyResult<Bound<'py, PyDict>> {
         let nodes = extract_iter_pynodes(py, &keys)?;
         let hs: HashSet<PyNode> = nodes.into_iter().collect();
-        let pm = self.inner.get_parent_map(&hs);
+        let pm = self.lookup(py, &hs);
         parent_map_to_pydict(py, pm)
     }
 }
 
 impl ParentsProvider<PyNode> for PyDictParentsProvider {
     fn get_parent_map(&self, keys: &HashSet<PyNode>) -> ParentMap<PyNode> {
-        self.inner.get_parent_map(keys)
+        Python::attach(|py| self.lookup(py, keys))
     }
 }
 
@@ -1212,6 +1228,34 @@ impl PyFrozenHeadsCache {
 struct PyCachingParentsProvider {
     inner: RsCachingParentsProvider<PyNode, PyParentsProviderAdapter>,
     real_provider_py: Py<PyAny>,
+    /// Live Python set exposed as `.missing_keys`. Callers in breezy mutate
+    /// it directly (e.g. `provider.missing_keys.clear()`), so it must be the
+    /// same object across reads. We sync this with the Rust state around
+    /// every `get_parent_map` call.
+    missing_keys_py: Py<pyo3::types::PySet>,
+}
+
+impl PyCachingParentsProvider {
+    /// Push Python set contents into Rust state.
+    fn sync_missing_to_rust(&self, py: Python<'_>) -> PyResult<()> {
+        let set = self.missing_keys_py.bind(py);
+        let mut keys: HashSet<PyNode> = HashSet::new();
+        for item in set.try_iter()? {
+            keys.insert(PyNode::from(item?));
+        }
+        self.inner.set_missing_keys(keys);
+        Ok(())
+    }
+
+    /// Pull Rust state into the Python set.
+    fn sync_missing_to_py(&self, py: Python<'_>) -> PyResult<()> {
+        let set = self.missing_keys_py.bind(py);
+        set.clear();
+        for k in self.inner.missing_keys() {
+            set.add(k.0)?;
+        }
+        Ok(())
+    }
 }
 
 #[pymethods]
@@ -1250,12 +1294,12 @@ impl PyCachingParentsProvider {
                 ))
             }
         };
-        let adapter = PyParentsProviderAdapter {
-            provider: provider_obj.clone_ref(py),
-        };
+        let adapter = PyParentsProviderAdapter::new(provider_obj.clone_ref(py));
+        let missing_keys_py = pyo3::types::PySet::empty(py)?.unbind();
         Ok(PyCachingParentsProvider {
             inner: RsCachingParentsProvider::new(adapter),
             real_provider_py: provider_obj,
+            missing_keys_py,
         })
     }
 
@@ -1265,14 +1309,17 @@ impl PyCachingParentsProvider {
     }
 
     #[pyo3(signature = (cache_misses=true))]
-    fn enable_cache(&self, cache_misses: bool) -> PyResult<()> {
+    fn enable_cache(&self, py: Python<'_>, cache_misses: bool) -> PyResult<()> {
         self.inner
             .enable_cache(cache_misses)
-            .map_err(pyo3::exceptions::PyAssertionError::new_err)
+            .map_err(pyo3::exceptions::PyAssertionError::new_err)?;
+        self.missing_keys_py.bind(py).clear();
+        Ok(())
     }
 
-    fn disable_cache(&self) {
+    fn disable_cache(&self, py: Python<'_>) {
         self.inner.disable_cache();
+        self.missing_keys_py.bind(py).clear();
     }
 
     /// Return a snapshot of the cache as a Python dict, or `None` if
@@ -1312,17 +1359,29 @@ impl PyCachingParentsProvider {
     ) -> PyResult<Bound<'py, PyDict>> {
         let nodes = extract_iter_pynodes(py, &keys)?;
         let hs: HashSet<PyNode> = nodes.into_iter().collect();
+        self.sync_missing_to_rust(py)?;
         let pm = self.inner.get_parent_map(&hs);
+        if let Some(err) = self.inner.inner().take_error() {
+            self.sync_missing_to_py(py)?;
+            return Err(err);
+        }
+        self.sync_missing_to_py(py)?;
         parent_map_to_pydict(py, pm)
     }
 
-    fn note_missing_key(&self, key: Py<PyAny>) {
-        self.inner.note_missing_key(PyNode::from(key));
+    fn note_missing_key(&self, py: Python<'_>, key: Py<PyAny>) -> PyResult<()> {
+        let node = PyNode::from(key);
+        self.inner.note_missing_key(node.clone());
+        // Mirror to the exposed Python set so callers see the new entry.
+        if self.inner.missing_keys().contains(&node) {
+            self.missing_keys_py.bind(py).add(node.0.clone_ref(py))?;
+        }
+        Ok(())
     }
 
     #[getter]
-    fn missing_keys<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PySet>> {
-        pynodes_to_pyset(py, self.inner.missing_keys())
+    fn missing_keys<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PySet> {
+        self.missing_keys_py.bind(py).clone()
     }
 }
 
@@ -1332,19 +1391,49 @@ impl PyCachingParentsProvider {
 ///
 /// The Python provider's `get_parent_map` must accept an iterable of keys
 /// and return a dict-like `{key: parents_tuple}` (missing keys are treated
-/// as ghosts). Any Python exception during the call is caught and converted
-/// to an empty response — matching the Python Graph's behavior of treating
-/// the provider as best-effort.
+/// as ghosts). If the Python call raises, the error is captured in
+/// `last_error` and an empty map is returned; callers should drain
+/// `last_error` after a Rust-level operation completes and surface the error
+/// back to Python.
 struct PyParentsProviderAdapter {
     provider: Py<PyAny>,
+    last_error: std::sync::Mutex<Option<PyErr>>,
+}
+
+impl PyParentsProviderAdapter {
+    fn new(provider: Py<PyAny>) -> Self {
+        Self {
+            provider,
+            last_error: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn take_error(&self) -> Option<PyErr> {
+        self.last_error.lock().unwrap().take()
+    }
+
+    fn set_error(&self, err: PyErr) {
+        let mut slot = self.last_error.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(err);
+        }
+    }
+
+    fn has_error(&self) -> bool {
+        self.last_error.lock().unwrap().is_some()
+    }
 }
 
 impl ParentsProvider<PyNode> for PyParentsProviderAdapter {
     fn get_parent_map(&self, keys: &HashSet<PyNode>) -> ParentMap<PyNode> {
+        if self.has_error() {
+            return ParentMap::new();
+        }
         Python::attach(|py| {
             let key_list = pyo3::types::PyList::empty(py);
             for k in keys {
-                if key_list.append(k.0.bind(py)).is_err() {
+                if let Err(err) = key_list.append(k.0.bind(py)) {
+                    self.set_error(err);
                     return ParentMap::new();
                 }
             }
@@ -1355,11 +1444,17 @@ impl ParentsProvider<PyNode> for PyParentsProviderAdapter {
             {
                 Ok(r) => r,
                 Err(err) => {
-                    err.restore(py);
+                    self.set_error(err);
                     return ParentMap::new();
                 }
             };
-            result.extract::<ParentMap<PyNode>>().unwrap_or_default()
+            match result.extract::<ParentMap<PyNode>>() {
+                Ok(pm) => pm,
+                Err(err) => {
+                    self.set_error(err);
+                    ParentMap::new()
+                }
+            }
         })
     }
 }
@@ -1368,6 +1463,15 @@ impl ParentsProvider<PyNode> for PyParentsProviderAdapter {
 struct PyGraph {
     inner: RsGraph<PyNode, PyParentsProviderAdapter>,
     provider_py: Py<PyAny>,
+}
+
+impl PyGraph {
+    fn check_error(&self) -> PyResult<()> {
+        if let Some(err) = self.inner.parents_provider().take_error() {
+            return Err(err);
+        }
+        Ok(())
+    }
 }
 
 fn extract_iter_pynodes(py: Python, obj: &Py<PyAny>) -> PyResult<Vec<PyNode>> {
@@ -1404,9 +1508,7 @@ fn cache_map_to_pydict<'py>(
 impl PyGraph {
     #[new]
     fn new(py: Python, parents_provider: Py<PyAny>) -> PyResult<Self> {
-        let adapter = PyParentsProviderAdapter {
-            provider: parents_provider.clone_ref(py),
-        };
+        let adapter = PyParentsProviderAdapter::new(parents_provider.clone_ref(py));
         Ok(PyGraph {
             inner: RsGraph::new(adapter),
             provider_py: parents_provider,
@@ -1426,12 +1528,18 @@ impl PyGraph {
     ) -> PyResult<Bound<'py, PyDict>> {
         let nodes = extract_iter_pynodes(py, &keys)?;
         let pm = self.inner.get_parent_map(nodes);
+        if let Some(err) = self.inner.parents_provider().take_error() {
+            return Err(err);
+        }
         parent_map_to_pydict(py, pm)
     }
 
     fn get_child_map<'py>(&self, py: Python<'py>, keys: Py<PyAny>) -> PyResult<Bound<'py, PyDict>> {
         let nodes = extract_iter_pynodes(py, &keys)?;
         let cm = self.inner.get_child_map(nodes);
+        if let Some(err) = self.inner.parents_provider().take_error() {
+            return Err(err);
+        }
         let d = PyDict::new(py);
         for (parent, children) in cm {
             let list: Vec<Py<PyAny>> = children.into_iter().map(|n| n.0).collect();
@@ -1442,7 +1550,8 @@ impl PyGraph {
 
     fn iter_topo_order(&self, py: Python, revisions: Py<PyAny>) -> PyResult<Vec<Py<PyAny>>> {
         let nodes = extract_iter_pynodes(py, &revisions)?;
-        self.inner
+        let res = self
+            .inner
             .iter_topo_order(nodes)
             .map(|v| v.into_iter().map(|n| n.0).collect())
             .map_err(|e| match e {
@@ -1450,7 +1559,9 @@ impl PyGraph {
                     GraphCycleError::new_err(("cycle in graph while iter_topo_order",))
                 }
                 other => pyo3::exceptions::PyValueError::new_err(format!("{:?}", other)),
-            })
+            });
+        self.check_error()?;
+        res
     }
 
     /// Return a lazy iterator over the lefthand ancestry of `start_key`.
@@ -1486,6 +1597,7 @@ impl PyGraph {
     ) -> PyResult<Vec<Bound<'py, pyo3::types::PyTuple>>> {
         let nodes = extract_iter_pynodes(py, &revision_ids)?;
         let pairs = self.inner.iter_ancestry(nodes);
+        self.check_error()?;
         pairs
             .into_iter()
             .map(|(k, parents)| {
@@ -1515,9 +1627,12 @@ impl PyGraph {
         }
         let null_bytes = pyo3::types::PyBytes::new(py, NULL_REVISION);
         let null = PyNode::from(null_bytes.into_any().unbind());
-        self.inner
+        let res = self
+            .inner
             .find_distance_to_null(target, known, null)
-            .map_err(graph_error_to_py)
+            .map_err(graph_error_to_py);
+        self.check_error()?;
+        res
     }
 
     fn find_lefthand_distances<'py>(
@@ -1529,6 +1644,7 @@ impl PyGraph {
         let null_bytes = pyo3::types::PyBytes::new(py, NULL_REVISION);
         let null = PyNode::from(null_bytes.into_any().unbind());
         let result = self.inner.find_lefthand_distances(nodes, null);
+        self.check_error()?;
         let d = PyDict::new(py);
         for (k, dist) in result {
             d.set_item(k.0, dist)?;
@@ -1558,6 +1674,7 @@ impl PyGraph {
         let null_bytes = pyo3::types::PyBytes::new(py, NULL_REVISION);
         let null = PyNode::from(null_bytes.into_any().unbind());
         let result = self.inner.heads_with_null(nodes, &null);
+        self.check_error()?;
         pynodes_to_pyset(py, result)
     }
 
@@ -1613,6 +1730,7 @@ impl PyGraph {
         let null_bytes = pyo3::types::PyBytes::new(py, NULL_REVISION);
         let null = PyNode::from(null_bytes.into_any().unbind());
         let result = self.inner.find_lca(nodes, &null);
+        self.check_error()?;
         pynodes_to_pyset(py, result)
     }
 
@@ -1626,14 +1744,16 @@ impl PyGraph {
         py: Python,
         candidate_ancestor: Py<PyAny>,
         candidate_descendant: Py<PyAny>,
-    ) -> bool {
+    ) -> PyResult<bool> {
         let null_bytes = pyo3::types::PyBytes::new(py, NULL_REVISION);
         let null = PyNode::from(null_bytes.into_any().unbind());
-        self.inner.is_ancestor(
+        let res = self.inner.is_ancestor(
             PyNode::from(candidate_ancestor),
             PyNode::from(candidate_descendant),
             &null,
-        )
+        );
+        self.check_error()?;
+        Ok(res)
     }
 
     /// Determine whether a revision is between two others.
@@ -1647,15 +1767,17 @@ impl PyGraph {
         revid: Py<PyAny>,
         lower_bound_revid: Option<Py<PyAny>>,
         upper_bound_revid: Option<Py<PyAny>>,
-    ) -> bool {
+    ) -> PyResult<bool> {
         let null_bytes = pyo3::types::PyBytes::new(py, NULL_REVISION);
         let null = PyNode::from(null_bytes.into_any().unbind());
-        self.inner.is_between(
+        let res = self.inner.is_between(
             PyNode::from(revid),
             lower_bound_revid.map(PyNode::from),
             upper_bound_revid.map(PyNode::from),
             &null,
-        )
+        );
+        self.check_error()?;
+        Ok(res)
     }
 
     /// Find the order that each revision was merged into tip.
@@ -1671,6 +1793,7 @@ impl PyGraph {
         let tip = PyNode::from(tip_revision_id);
         let lcas = extract_iter_pynodes(py, &lca_revision_ids)?;
         let result = self.inner.find_merge_order(tip, lcas);
+        self.check_error()?;
         Ok(result.into_iter().map(|n| n.0).collect())
     }
 
@@ -1715,6 +1838,7 @@ impl PyGraph {
         let unique = PyNode::from(unique_revision);
         let commons = extract_iter_pynodes(py, &common_revisions)?;
         let result = self.inner.find_unique_ancestors(unique, commons);
+        self.check_error()?;
         pynodes_to_pyset(py, result)
     }
 
@@ -1731,6 +1855,7 @@ impl PyGraph {
         let left = PyNode::from(left_revision);
         let right = PyNode::from(right_revision);
         let (l, r) = self.inner.find_difference(left, right);
+        self.check_error()?;
         Ok((pynodes_to_pyset(py, l)?, pynodes_to_pyset(py, r)?))
     }
 
@@ -1760,7 +1885,9 @@ impl PyGraph {
         let right = PyNode::from(right_revision.clone_ref(py));
         let null_bytes = pyo3::types::PyBytes::new(py, NULL_REVISION);
         let null = PyNode::from(null_bytes.into_any().unbind());
-        match self.inner.find_unique_lca(left, right, &null) {
+        let res = self.inner.find_unique_lca(left, right, &null);
+        self.check_error()?;
+        match res {
             Some((key, steps)) => {
                 if count_steps {
                     Ok(pyo3::types::PyTuple::new(
@@ -1794,7 +1921,9 @@ impl PyGraph {
     ) -> PyResult<Option<Py<PyAny>>> {
         let merged = PyNode::from(merged_key);
         let tip = PyNode::from(tip_key);
-        Ok(self.inner.find_lefthand_merger(merged, tip).map(|n| n.0))
+        let res = self.inner.find_lefthand_merger(merged, tip).map(|n| n.0);
+        self.check_error()?;
+        Ok(res)
     }
 
     /// Find descendants of `old_key` that are ancestors of `new_key`.
@@ -1807,6 +1936,7 @@ impl PyGraph {
         let old = PyNode::from(old_key);
         let new = PyNode::from(new_key);
         let result = self.inner.find_descendants(old, new);
+        self.check_error()?;
         pynodes_to_pyset(py, result)
     }
 
@@ -1866,6 +1996,7 @@ impl PyGraph {
         let old = PyNode::from(old_key);
         let new = PyNode::from(new_key);
         let result = self.inner.find_descendant_ancestors(old, new);
+        self.check_error()?;
         pynodes_to_pyset(py, result)
     }
 
@@ -1924,9 +2055,7 @@ impl PyBFSearcher {
         }
         Ok(PyBFSearcher {
             state: BfsState::new(revs),
-            adapter: PyParentsProviderAdapter {
-                provider: parents_provider,
-            },
+            adapter: PyParentsProviderAdapter::new(parents_provider),
         })
     }
 
@@ -1980,14 +2109,22 @@ impl PyBFSearcher {
 
     /// Python `step` returns the next query set, or `()` on StopIteration.
     fn step<'py>(&mut self, py: Python<'py>) -> PyResult<Py<PyAny>> {
-        match self.state.next_set(&self.adapter) {
+        let next = self.state.next_set(&self.adapter);
+        if let Some(err) = self.adapter.take_error() {
+            return Err(err);
+        }
+        match next {
             Some(set) => Ok(pynodes_to_pyset(py, set)?.into_any().unbind()),
             None => Ok(pyo3::types::PyTuple::empty(py).into_any().unbind()),
         }
     }
 
     fn __next__<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PySet>> {
-        match self.state.next_set(&self.adapter) {
+        let next = self.state.next_set(&self.adapter);
+        if let Some(err) = self.adapter.take_error() {
+            return Err(err);
+        }
+        match next {
             Some(set) => pynodes_to_pyset(py, set),
             None => Err(pyo3::exceptions::PyStopIteration::new_err(())),
         }
@@ -2004,7 +2141,11 @@ impl PyBFSearcher {
         Bound<'py, pyo3::types::PySet>,
         Bound<'py, pyo3::types::PySet>,
     )> {
-        match self.state.next_with_ghosts(&self.adapter) {
+        let next = self.state.next_with_ghosts(&self.adapter);
+        if let Some(err) = self.adapter.take_error() {
+            return Err(err);
+        }
+        match next {
             Some((present, ghosts)) => Ok((
                 pynodes_to_pyset(py, present)?,
                 pynodes_to_pyset(py, ghosts)?,
@@ -2026,6 +2167,9 @@ impl PyBFSearcher {
         Bound<'py, pyo3::types::PySet>,
     )> {
         let (started, excludes, included) = self.state.get_state(&self.adapter);
+        if let Some(err) = self.adapter.take_error() {
+            return Err(err);
+        }
         Ok((
             pynodes_to_pyset(py, started)?,
             pynodes_to_pyset(py, excludes)?,
@@ -2043,6 +2187,9 @@ impl PyBFSearcher {
             revs.push(PyNode::from(item?));
         }
         let result = self.state.find_seen_ancestors(revs, &self.adapter);
+        if let Some(err) = self.adapter.take_error() {
+            return Err(err);
+        }
         pynodes_to_pyset(py, result)
     }
 
@@ -2064,7 +2211,11 @@ impl PyBFSearcher {
         for item in revisions.bind(py).try_iter()? {
             revs.push(PyNode::from(item?));
         }
-        match self.state.start_searching(revs, &self.adapter) {
+        let res = self.state.start_searching(revs, &self.adapter);
+        if let Some(err) = self.adapter.take_error() {
+            return Err(err);
+        }
+        match res {
             Some((present, ghosts)) => {
                 let pres = pynodes_to_pyset(py, present)?;
                 let gh = pynodes_to_pyset(py, ghosts)?;

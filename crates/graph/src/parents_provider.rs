@@ -171,6 +171,13 @@ impl<K: Hash + Eq + Clone, P: ParentsProvider<K>> CachingParentsProvider<K, P> {
         self.state.lock().unwrap().missing_keys.clone()
     }
 
+    /// Replace the missing-keys set wholesale. Used by the Python bindings to
+    /// sync external mutations of the exposed Python set back into Rust state.
+    pub fn set_missing_keys<I: IntoIterator<Item = K>>(&self, keys: I) {
+        let mut state = self.state.lock().unwrap();
+        state.missing_keys = keys.into_iter().collect();
+    }
+
     /// Borrow the inner provider.
     pub fn inner(&self) -> &P {
         &self.inner
