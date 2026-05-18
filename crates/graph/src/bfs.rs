@@ -98,6 +98,31 @@ impl<K: Hash + Eq + Clone> BfsState<K> {
         &self.next_query
     }
 
+    /// Borrow the present revisions from the most recent advance.
+    ///
+    /// Exposed so bindings can reflect Python's `_current_present`
+    /// attribute. Empty until the first advance.
+    pub fn current_present(&self) -> &FxHashSet<K> {
+        &self.current_present
+    }
+
+    /// Borrow the ghost revisions from the most recent advance.
+    ///
+    /// Exposed so bindings can reflect Python's `_current_ghosts`
+    /// attribute. Empty until the first advance.
+    pub fn current_ghosts(&self) -> &FxHashSet<K> {
+        &self.current_ghosts
+    }
+
+    /// Borrow the parent map of present revisions from the most recent
+    /// advance.
+    ///
+    /// Exposed so bindings can reflect Python's `_current_parents`
+    /// attribute. Empty until the first advance.
+    pub fn current_parents(&self) -> &FxHashMap<K, Vec<K>> {
+        &self.current_parents
+    }
+
     /// Snapshot of `(started_keys, excludes, included_keys)` describing what
     /// the searcher has reached. Matches Python's `get_state` return shape.
     ///
