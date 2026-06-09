@@ -1946,3 +1946,19 @@ class TestStackedParentsProvider(TestCase):
             ],
             self.calls,
         )
+
+    def test_honours_live_mutation_of_iterable(self):
+        # Mutating the iterable that was passed to StackedParentsProvider
+        # after construction must affect subsequent get_parent_map calls,
+        # so that callers passing a lazy/joined list (e.g. breezy's
+        # _LazyListJoin) see freshly added fallback repositories.
+        providers = [_mod_graph.DictParentsProvider({b"rev1": [b"rev0"]})]
+        stacked = _mod_graph.StackedParentsProvider(providers)
+        self.assertEqual(
+            {b"rev1": (b"rev0",)}, stacked.get_parent_map([b"rev1", b"rev2"])
+        )
+        providers.append(_mod_graph.DictParentsProvider({b"rev2": [b"rev1"]}))
+        self.assertEqual(
+            {b"rev1": (b"rev0",), b"rev2": (b"rev1",)},
+            stacked.get_parent_map([b"rev1", b"rev2"]),
+        )
