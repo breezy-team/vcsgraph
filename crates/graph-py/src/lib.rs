@@ -256,28 +256,24 @@ impl ParentsProvider<PyNode> for PyDictParentsProvider {
 /// If a child exposes `get_cached_parent_map`, that fast path is queried
 /// first for all children before any full `get_parent_map` call — just
 /// like the Python version.
+///
+/// The provider iterable is stored as-is and re-iterated on every
+/// `get_parent_map` call, so live mutations (e.g. appending a fallback to
+/// the list passed in) take effect on subsequent lookups.
 #[pyclass(name = "StackedParentsProvider")]
 struct PyStackedParentsProvider {
-    parent_providers: Vec<Py<PyAny>>,
+    parent_providers: Py<PyAny>,
 }
 
 #[pymethods]
 impl PyStackedParentsProvider {
     #[new]
-    fn new(py: Python, parent_providers: Py<PyAny>) -> PyResult<Self> {
-        let mut providers = Vec::new();
-        for p in parent_providers.bind(py).try_iter()? {
-            providers.push(p?.unbind());
-        }
-        Ok(PyStackedParentsProvider {
-            parent_providers: providers,
-        })
+    fn new(parent_providers: Py<PyAny>) -> PyResult<Self> {
+        Ok(PyStackedParentsProvider { parent_providers })
     }
 
     fn __repr__(&self, py: Python) -> PyResult<String> {
-        let list =
-            pyo3::types::PyList::new(py, self.parent_providers.iter().map(|p| p.clone_ref(py)))?;
-        let r = list.repr()?;
+        let r = self.parent_providers.bind(py).repr()?;
         Ok(format!("StackedParentsProvider({})", r))
     }
 
@@ -294,12 +290,12 @@ impl PyStackedParentsProvider {
 
         // First pass: any provider that implements get_cached_parent_map
         // gets queried cheaply before we hit the slow path.
-        for pp in &self.parent_providers {
+        for pp in self.parent_providers.bind(py).try_iter()? {
             if remaining.is_empty() {
                 break;
             }
-            let bound = pp.bind(py);
-            let get_cached = bound.getattr("get_cached_parent_map");
+            let pp = pp?;
+            let get_cached = pp.getattr("get_cached_parent_map");
             let Ok(get_cached) = get_cached else {
                 continue;
             };
@@ -318,12 +314,12 @@ impl PyStackedParentsProvider {
         }
 
         // Second pass: full get_parent_map calls, in order.
-        for pp in &self.parent_providers {
+        for pp in self.parent_providers.bind(py).try_iter()? {
             if remaining.is_empty() {
                 break;
             }
-            let bound = pp.bind(py);
-            let new_found = match bound.call_method1("get_parent_map", (remaining.clone(),)) {
+            let pp = pp?;
+            let new_found = match pp.call_method1("get_parent_map", (remaining.clone(),)) {
                 Ok(r) => r,
                 Err(err) => {
                     // Match Python's behaviour of catching UnsupportedOperation
