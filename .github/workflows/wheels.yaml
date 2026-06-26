@@ -59,42 +59,32 @@ jobs:
     needs: define-matrix
     strategy:
       matrix:
-        os: [ubuntu-latest]
-      fail-fast: true
+        include: ${{ fromJSON(needs.define-matrix.outputs.matrix) }}
+      fail-fast: false
 
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
       - name: set up rust
-        if: matrix.os != 'ubuntu'
+        if: matrix.os != 'ubuntu-latest'
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
           toolchain: nightly
           override: true
-      - name: Install native dependencies (MacOS)
-        run: brew install swig gpgme
-        if: "matrix.os == 'macos-latest'"
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install setuptools wheel cibuildwheel
-      - name: Install gpg on supported platforms
-        run: pip install -U gpg
-        if: "matrix.os == 'macos-latest'"
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
         if: "matrix.os == 'ubuntu-latest'"
       - name: Build wheels
-        run: python -m cibuildwheel --output-dir wheelhouse
+        run: python -m cibuildwheel --only ${{ matrix.build-identifier }} --output-dir wheelhouse
         env:
-          CIBW_ARCHS_MACOS: x86_64 arm64 universal2
-          CIBW_SKIP: '*-win32 *-musllinux_* *cp314*'
-          CIBW_ENVIRONMENT: 'PATH="$HOME/.cargo/bin:$PATH" PYO3_USE_ABI3_FORWARD_COMPATIBILITY="1"'
-          CIBW_BEFORE_BUILD: >
-            pip install -U setuptools-rust &&
-            curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain=nightly --profile=minimal -y &&
-            rustup show
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH" PYO3_USE_ABI3_FORWARD_COMPATIBILITY="1"'
+          CIBW_ENVIRONMENT_MACOS: 'PATH="$HOME/.cargo/bin:$PATH" PYO3_USE_ABI3_FORWARD_COMPATIBILITY="1"'
+          CIBW_ENVIRONMENT_WINDOWS: 'PYO3_USE_ABI3_FORWARD_COMPATIBILITY="1"'
           CIBW_BEFORE_BUILD_LINUX: >
             pip install -U setuptools-rust &&
             yum install libatomic -y &&
@@ -104,6 +94,11 @@ jobs:
             pip install -U setuptools-rust &&
             curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain=nightly --profile=minimal -y &&
             rustup target add x86_64-apple-darwin &&
+            rustup show
+          CIBW_BEFORE_BUILD_WINDOWS: >
+            pip install -U setuptools-rust &&
+            rustup toolchain install nightly &&
+            rustup default nightly &&
             rustup show
       - name: Upload wheels
         uses: actions/upload-artifact@v7

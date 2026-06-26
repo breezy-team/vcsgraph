@@ -103,6 +103,15 @@ ignore = [
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
+[tool.cibuildwheel]
+skip = "*cp314*"
+
 [tool.cibuildwheel.linux]
-skip = "*-musllinux_*"
+skip = "*-musllinux_* *cp314*"
 archs = ["auto", "aarch64"]
+
+[tool.cibuildwheel.macos]
+archs = ["x86_64", "arm64", "universal2"]
+
+[tool.cibuildwheel.windows]
+skip = "*-win32 *cp314*"
