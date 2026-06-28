@@ -83,7 +83,7 @@ jobs:
         run: python -m cibuildwheel --only ${{ matrix.build-identifier }} --output-dir wheelhouse
         env:
           CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH" PYO3_USE_ABI3_FORWARD_COMPATIBILITY="1"'
-          CIBW_ENVIRONMENT_MACOS: 'PATH="$HOME/.cargo/bin:$PATH" PYO3_USE_ABI3_FORWARD_COMPATIBILITY="1"'
+          CIBW_ENVIRONMENT_MACOS: 'PATH="$HOME/.cargo/bin:$PATH" PYO3_USE_ABI3_FORWARD_COMPATIBILITY="1" MACOSX_DEPLOYMENT_TARGET="10.12"'
           CIBW_ENVIRONMENT_WINDOWS: 'PYO3_USE_ABI3_FORWARD_COMPATIBILITY="1"'
           CIBW_BEFORE_BUILD_LINUX: >
             pip install -U setuptools-rust &&
