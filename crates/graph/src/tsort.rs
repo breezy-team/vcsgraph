@@ -105,17 +105,12 @@ impl<K: Eq + Hash + std::fmt::Debug + Clone> Iterator for TopoSorter<K> {
                     }
                 }
             }
-            if let Some(node_name) = self.graph.keys().next() {
-                let node_name = node_name.clone();
-                let parents = self.graph.remove(&node_name).unwrap();
-                // now pick a random node in the source graph, and transfer it to the
-                // top of the depth first search stack of pending nodes.
-                self.pending_node_stack.push(node_name);
-                self.pending_parents_stack.push(parents);
-            } else {
-                // if the source graph is empty, we are done.
-                return None;
-            }
+            let node_name = self.graph.keys().next()?.clone();
+            let parents = self.graph.remove(&node_name).unwrap();
+            // now pick a random node in the source graph, and transfer it to the
+            // top of the depth first search stack of pending nodes.
+            self.pending_node_stack.push(node_name);
+            self.pending_parents_stack.push(parents);
         }
     }
 }
