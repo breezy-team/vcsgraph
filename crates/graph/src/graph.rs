@@ -1051,7 +1051,7 @@ where
             .collect();
         let mut active: FxHashSet<K> = candidate_heads.iter().cloned().collect();
         // Skip the first yield (the candidate itself).
-        for (_, searcher) in searchers.iter_mut() {
+        for searcher in searchers.values_mut() {
             searcher.next_set(&self.provider);
         }
         // Common walker: tracks nodes known to be common across all
