@@ -54,10 +54,10 @@ from vcsgraph import topo_sort
 
 # Define a graph as a list of (node, parents) tuples
 graph = [
-    (b'rev1', []),
-    (b'rev2', [b'rev1']),
-    (b'rev3', [b'rev1']),
-    (b'rev4', [b'rev2', b'rev3']),
+    (b"rev1", []),
+    (b"rev2", [b"rev1"]),
+    (b"rev3", [b"rev1"]),
+    (b"rev4", [b"rev2", b"rev3"]),
 ]
 
 # Sort nodes topologically (parents before children)
@@ -71,17 +71,17 @@ from vcsgraph import Graph, DictParentsProvider
 
 # Create a parents provider from a dictionary
 ancestry = {
-    b'rev1': (b'null:',),
-    b'rev2a': (b'rev1',),
-    b'rev2b': (b'rev1',),
-    b'rev3': (b'rev2a',),
-    b'rev4': (b'rev3', b'rev2b'),
+    b"rev1": (b"null:",),
+    b"rev2a": (b"rev1",),
+    b"rev2b": (b"rev1",),
+    b"rev3": (b"rev2a",),
+    b"rev4": (b"rev3", b"rev2b"),
 }
 parents_provider = DictParentsProvider(ancestry)
 
 # Create a graph and find merge bases
 graph = Graph(parents_provider)
-merge_base = graph.find_merge_base(b'rev2a', b'rev2b')
+merge_base = graph.find_merge_base(b"rev2a", b"rev2b")
 ```
 
 ### Working with Known Graphs
@@ -91,14 +91,14 @@ from vcsgraph import KnownGraph
 
 # Create a known graph from parent relationships
 parent_map = {
-    b'rev1': (b'null:',),
-    b'rev2': (b'rev1',),
-    b'rev3': (b'rev2',),
+    b"rev1": (b"null:",),
+    b"rev2": (b"rev1",),
+    b"rev3": (b"rev2",),
 }
 kg = KnownGraph(parent_map)
 
 # Get heads (revisions with no children)
-heads = kg.heads([b'rev1', b'rev2', b'rev3'])
+heads = kg.heads([b"rev1", b"rev2", b"rev3"])
 ```
 
 ## Performance
